@@ -59,11 +59,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785429715,
-        "narHash": "sha256-k3w/dE+pOmyYxA4zgNb6d66Z6PfjNCNkwP77YH10LP4=",
+        "lastModified": 1785430449,
+        "narHash": "sha256-IO1yX8b2tzstvjfovYt5IktJ9dPrW8JdKLmbe6LRFzI=",
         "owner": "hcbt",
         "repo": "coldstart",
-        "rev": "9e45bcad10808d865445c393cd2ac33b0ef0bba6",
+        "rev": "2cc2f473453d5a56b0c6cd96445be5516894df6b",
         "type": "github"
       },
       "original": {
