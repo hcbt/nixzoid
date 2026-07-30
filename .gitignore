@@ -1,0 +1,10 @@
+.direnv/
+result
+result-*
+.DS_Store
+
+# written by prek when the dev shell is entered
+.pre-commit-config.yaml
+
+# devenv, if a shell ever uses it here
+.devenv
