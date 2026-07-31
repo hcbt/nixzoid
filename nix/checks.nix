@@ -128,6 +128,11 @@
               has "zombie.network.GameServer" "the server main class"
               has "-cachedir=" "state has to be redirected out of the read-only store"
               has "steam_appid.txt" "the Steam API reads the app id from the working directory"
+              # media/ and the Lua tree are resolved against the CWD, so the
+              # install tree has to be reachable from the state directory. Without
+              # it the server dies deep in world load on a null Lua env, having
+              # logged an empty map-folder list and nothing about media/.
+              has 'ln -s "$entry"' "the install tree must be linked into the writable state dir"
               has "LD_LIBRARY_PATH" "steamclient.so is resolved through LD_LIBRARY_PATH"
 
               # HOME and -cachedir= must agree. The server resolves some paths
