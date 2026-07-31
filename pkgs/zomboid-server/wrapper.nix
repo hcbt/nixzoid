@@ -61,7 +61,27 @@ let
   launcher = ''
     state="''${ZOMBOID_STATE_DIR:-${stateDir}}"
     mkdir -p "$state"
-    cd "$state"
+
+    # The working directory must be the INSTALL ROOT, exactly as upstream's
+    # start-server.sh arranges with `cd "$INSTDIR"`. The server resolves its
+    # media — the animation assets, the worldgen Lua, the map data — through a
+    # scan rooted here, and it is a scan rather than direct opens because the
+    # game asks for lowercase logical names (`bob/bob_idle`) against a tree that
+    # is actually cased (`Bob/Bob_Idle.x`).
+    #
+    # Running from the state directory instead, even with the whole install tree
+    # symlinked into it, does not work: the scan resolves out of the base
+    # directory and indexes nothing. The server then starts, and dies deep in
+    # world load on whichever lookup comes first:
+    #
+    #   Required Animation Asset not found: bob/bob_idle
+    #   attempted index: biomes of non-table: null   (WorldGenOverride.lua:4)
+    #
+    # Neither names a missing file, and every one of those files is present.
+    #
+    # The store is read-only and that is fine: the server writes nothing here.
+    # Everything it persists goes to -cachedir/HOME below.
+    cd ${root}
 
     # The server resolves several paths from HOME independently of
     # -cachedir=, so both have to agree or state lands in two places.
@@ -74,39 +94,8 @@ let
     # the missing library.
     export LD_LIBRARY_PATH="${root}/linux64:${root}:${steamworks-sdk-redist}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-    # The game data has to be reachable RELATIVE TO THE WORKING DIRECTORY.
-    #
-    # Upstream's start-server.sh runs `cd "$INSTDIR"` first, and the server
-    # leans on that: `media/` and the Lua tree are resolved against the cwd, not
-    # against the classpath or any flag. Running from the state directory
-    # instead gets a server that starts, finds nothing, and dies well into
-    # world load:
-    #
-    #   Looking in these map folders:
-    #   <End of map-folders list>
-    #   java.lang.NullPointerException: ... "zombie.Lua.LuaManager.env" is null
-    #       at zombie.iso.worldgen.WorldGenChunk.<init>(WorldGenChunk.java:82)
-    #
-    # An empty map-folder list and a null Lua env are the same symptom: no
-    # media/. Neither names a missing directory.
-    #
-    # `cd`ing into the store instead is not an option — the server writes into
-    # its working directory, and the store is read-only. So the install tree is
-    # symlinked INTO the writable state directory, which satisfies the relative
-    # lookups while leaving somewhere to write. Only names that do not already
-    # exist are linked, so the server's own Saves/, Server/, Logs/ and db/ are
-    # never shadowed, and a re-run is idempotent.
-    for entry in ${root}/*; do
-      name="$(basename "$entry")"
-      [ -e "$state/$name" ] || ln -s "$entry" "$state/$name"
-    done
-
-    # The Steam API reads the app id from the working directory, not from an
-    # argument. A copy rather than the symlink made above: some Steam versions
-    # refuse to follow one, so this replaces it.
-    rm -f "$state/steam_appid.txt"
-    cp ${root}/steam_appid.txt "$state/steam_appid.txt"
-    chmod u+w "$state/steam_appid.txt"
+    # steam_appid.txt needs no handling: the Steam API reads it from the working
+    # directory, which is now the install root, and the depot ships it there.
 
     exec ${root}/jre64/bin/java \
       "-Xmx''${ZOMBOID_HEAP:-${heapSize}}" \
