@@ -10,12 +10,32 @@
 # So this skips both and invokes the JVM directly with absolute paths. The
 # arguments are exactly the ones ProjectZomboid64.json specifies, plus the heap
 # made configurable rather than frozen at upstream's 8g.
+#
+# ## The runtime interface
+#
+# Everything a deployment sets is read from the environment, never baked in —
+# this derivation carries ~7G of Steam depots, and a value baked into it costs a
+# full image rebuild and re-push to change.
+#
+#   ZOMBOID_STATE_DIR            saves, config and logs                (/data)
+#   ZOMBOID_HEAP                 JVM heap                              (8g)
+#   ZOMBOID_SERVER_NAME          names the config files, -servername   (servertest)
+#   ZOMBOID_CONFIG_FILE          <name>.ini fragment, merged key by key
+#   ZOMBOID_CONFIG_SECRET_FILE   the same, applied after — for Password/RCONPassword
+#   ZOMBOID_SANDBOX_FILE         <name>_SandboxVars.lua, copied whole
+#   ZOMBOID_SPAWNREGIONS_FILE    <name>_spawnregions.lua, copied whole
+#   ZOMBOID_ADMIN_USERNAME       admin account name                    (admin)
+#   ZOMBOID_ADMIN_PASSWORD_FILE  without it, a FIRST boot hangs on a prompt
+#
+# `nixzoid.lib.mkServerIni` and `mkSandboxVars` render the two files; the NixOS
+# module and the Helm values are both meant to go through them.
 {
   lib,
   stdenv,
   writeShellApplication,
   zomboid-server-unwrapped,
   steamworks-sdk-redist,
+  zomboid-merge-ini,
   coreutils,
 
   # The JVM heap, as a DEFAULT — `$ZOMBOID_HEAP` overrides it at runtime.
@@ -35,6 +55,14 @@
   # scatters state across two places — one of which is usually the read-only
   # store.
   stateDir ? "/data",
+
+  # The server name, as a DEFAULT — `$ZOMBOID_SERVER_NAME` overrides it.
+  #
+  # It names the config files under `Server/`, and the launcher passes it as
+  # `-servername` itself so that the two cannot disagree. Upstream's default,
+  # kept because changing it means the server writes a fresh config and appears
+  # to have lost its settings.
+  serverName ? "servertest",
 
   extraVmArgs ? [ ],
 }:
@@ -60,7 +88,11 @@ let
 
   launcher = ''
     state="''${ZOMBOID_STATE_DIR:-${stateDir}}"
-    mkdir -p "$state"
+    name="''${ZOMBOID_SERVER_NAME:-${serverName}}"
+
+    # Server/ is where both config files live, and the server does not create
+    # it before trying to read them.
+    mkdir -p "$state" "$state/Server"
 
     # The working directory must be the INSTALL ROOT, exactly as upstream's
     # start-server.sh arranges with `cd "$INSTDIR"`. The server resolves its
@@ -97,18 +129,75 @@ let
     # steam_appid.txt needs no handling: the Steam API reads it from the working
     # directory, which is now the install root, and the depot ships it there.
 
+    # ---- configuration -------------------------------------------------
+    #
+    # All of it arrives at RUNTIME, through the environment, and none of it is
+    # baked into this derivation. Baking it would put the mod list and the
+    # server settings inside a ~7G image, so adding one mod would mean
+    # rebuilding and re-pushing the whole thing. Same reasoning as the heap
+    # above.
+
+    # Merged key by key rather than copied over: the server maintains ~150
+    # options in this file and rewrites it as it runs, so replacing it would
+    # reset every option not declared in Nix on each restart.
+    if [ -n "''${ZOMBOID_CONFIG_FILE:-}" ]; then
+      zomboid-merge-ini "$ZOMBOID_CONFIG_FILE" "$state/Server/$name.ini"
+    fi
+
+    # Applied after, so a password out of a Kubernetes Secret or a systemd
+    # credential wins over anything the declarative half set — and never has to
+    # pass through the world-readable Nix store to get here.
+    if [ -n "''${ZOMBOID_CONFIG_SECRET_FILE:-}" ]; then
+      zomboid-merge-ini "$ZOMBOID_CONFIG_SECRET_FILE" "$state/Server/$name.ini"
+    fi
+
+    # Whole-file, unlike the ini: merging Lua means parsing Lua, and a
+    # line-oriented approximation corrupts a nested group instead of failing.
+    # `install` rather than `cp`, for the write bit — the source is in the
+    # read-only store and the server rewrites both of these itself.
+    if [ -n "''${ZOMBOID_SANDBOX_FILE:-}" ]; then
+      install -m 0644 "$ZOMBOID_SANDBOX_FILE" "$state/Server/''${name}_SandboxVars.lua"
+    fi
+
+    if [ -n "''${ZOMBOID_SPAWNREGIONS_FILE:-}" ]; then
+      install -m 0644 "$ZOMBOID_SPAWNREGIONS_FILE" "$state/Server/''${name}_spawnregions.lua"
+    fi
+
+    # ---- admin account -------------------------------------------------
+    #
+    # With no admin in the state directory the server PROMPTS for one on stdin
+    # and waits. Under systemd or in a pod there is nothing to answer it, so a
+    # first boot without this hangs — with a log that ends mid-startup and
+    # names nothing.
+    #
+    # The password reaches the server on its command line, where /proc exposes
+    # it to anything that can read the process table. The server offers no
+    # other way in; the file itself is what stays out of the store.
+    admin=()
+    if [ -n "''${ZOMBOID_ADMIN_PASSWORD_FILE:-}" ]; then
+      admin=(
+        -adminusername "''${ZOMBOID_ADMIN_USERNAME:-admin}"
+        -adminpassword "$(cat "$ZOMBOID_ADMIN_PASSWORD_FILE")"
+      )
+    fi
+
     exec ${root}/jre64/bin/java \
       "-Xmx''${ZOMBOID_HEAP:-${heapSize}}" \
       ${lib.escapeShellArgs vmArgs} \
       -cp ${lib.escapeShellArg "${root}/java/.:${root}/java/projectzomboid.jar"} \
       zombie.network.GameServer \
       -cachedir="$state" \
+      -servername "$name" \
+      ''${admin[@]+"''${admin[@]}"} \
       "$@"
   '';
 in
 (writeShellApplication {
   name = "zomboid-server";
-  runtimeInputs = [ coreutils ];
+  runtimeInputs = [
+    coreutils
+    zomboid-merge-ini
+  ];
   text = launcher;
 }).overrideAttrs
   (old: {

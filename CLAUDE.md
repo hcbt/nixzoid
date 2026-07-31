@@ -11,7 +11,15 @@ Zomboid-shaped remainder.
   autoPatchelf'd. This is the ~7G half.
 - `pkgs/zomboid-server/wrapper.nix` — the launcher. Replaces upstream's
   `start-server.sh` + `ProjectZomboid64.json`, which cannot work from a
-  read-only store.
+  read-only store. Also the whole runtime interface: every `ZOMBOID_*` variable
+  is documented at the top of it.
+- `pkgs/zomboid-server/config-format.nix` — renders `<name>.ini` and
+  `<name>_SandboxVars.lua`. A pure function of `lib`, exported as
+  `flake.lib`, so the NixOS module and the cluster repository's Helm values go
+  through the same renderer.
+- `pkgs/zomboid-server/merge-ini.nix` — applies a declared ini fragment over
+  the one the server maintains. The only real behaviour here, and the only
+  check that runs rather than evaluates.
 - `nix/overlay.nix` — the overlay, in its own file so checks can apply it
   without going through `inputs.self`.
 - `nix/nixos-module.nix` — `services.zomboid`, on top of coldstart's container.
@@ -31,6 +39,20 @@ Zomboid-shaped remainder.
 - **Nothing in `checks` may build the server.** The depots are ~7G. Every check
   here asserts on evaluation or on `passthru`, and
   `nix build .#zomboid-image` is what proves the heavy half works.
+- **Configuration is never baked into the package.** Mods, server settings and
+  the server name all arrive through the environment at runtime. A value built
+  into the wrapper sits inside a ~7G image, so changing it costs a rebuild and
+  a re-push — the reasoning that already made `heapSize` an environment
+  variable, applied to everything a deployment sets.
+- **`writeShellApplication` runs shellcheck at BUILD time, which never happens
+  here.** The launcher cannot be built without the depots, so its lint is
+  unreachable on a laptop and in CI. `checks.launcher-shellcheck` lints the
+  `passthru` text instead; without it a shell mistake surfaces an hour into the
+  image workflow.
+- **`extraContainerConfig` is merged with `//`.** Declaring `bindMounts` there
+  REPLACES coldstart's own rather than adding to it, so the state mount has to
+  be restated alongside any secret mount. Dropping it puts the saves in the
+  container's ephemeral root, where a restart discards them silently.
 - **Discard the string context when a check reads a store-path-bearing
   string.** `zomboid-server.launcher` and the module's `execStart` both
   interpolate the unwrapped server's path; handing either to a derivation makes

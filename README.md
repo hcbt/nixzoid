@@ -80,12 +80,73 @@ knowing about, because getting any wrong produces a server that _starts_:
 `checks.launcher-arguments` asserts on all of them, because every one of those
 failures costs a full server start to discover.
 
-## Running it
+## Configuring it
+
+Mods and server settings arrive at **runtime, through the environment**. None of
+it is baked into the package — that derivation carries ~7G of Steam depots, so a
+mod list built into it would make adding one mod a full image rebuild and
+re-push. Same reason the heap is an environment variable.
+
+| Variable                      | What                                                     |
+| ----------------------------- | -------------------------------------------------------- |
+| `ZOMBOID_STATE_DIR`           | Saves, config and logs (`/data`)                         |
+| `ZOMBOID_HEAP`                | JVM heap (`8g`)                                          |
+| `ZOMBOID_SERVER_NAME`         | Names the config files, and `-servername` (`servertest`) |
+| `ZOMBOID_CONFIG_FILE`         | `<name>.ini` fragment, merged key by key                 |
+| `ZOMBOID_CONFIG_SECRET_FILE`  | The same, applied after — `Password`, `RCONPassword`     |
+| `ZOMBOID_SANDBOX_FILE`        | `<name>_SandboxVars.lua`, copied whole                   |
+| `ZOMBOID_SPAWNREGIONS_FILE`   | `<name>_spawnregions.lua`, copied whole                  |
+| `ZOMBOID_ADMIN_USERNAME`      | Admin account name (`admin`)                             |
+| `ZOMBOID_ADMIN_PASSWORD_FILE` | Without it a **first** boot hangs — see below            |
+
+Three things about this are worth knowing before the first start:
+
+- **The ini is merged, not replaced.** The server maintains ~150 options in that
+  file and rewrites it as it runs. Only the keys you declare are re-applied on
+  each start; the rest stay as the server left them. The flip side: an in-game
+  change to a key you declared is gone at the next restart.
+- **`SandboxVars.lua` _is_ replaced**, whole, every start. Merging it would mean
+  parsing Lua, and a line-oriented approximation corrupts a nested group instead
+  of failing. Keys you leave out take the server's defaults, so a short file is a
+  complete one.
+- **A first boot without an admin password hangs.** With no administrator in the
+  state directory the server asks for one on stdin and waits. Nothing in a
+  container answers, so the start stops part-way with nothing in the log naming
+  the prompt.
+
+### Mods
+
+`WorkshopItems=` and `Mods=` are **two separate keys and both are required** —
+one says what to fetch, the other what to load. Only the first, and the server
+downloads mods it never enables; only the second, and it enables mods it never
+downloaded. Neither failure says anything useful in the log, so the module warns
+when one is set without the other.
+
+The server downloads the Workshop items itself on start, into the state volume.
+Nothing is pinned, which is the trade: adding a mod costs a restart instead of a
+rebuild, and a mod author's update lands on the next restart unannounced.
 
 ### On Kubernetes
 
-The chart is coldstart's; this repository supplies only the image. See
-`apps/zomboid/values.yaml` in the cluster repository for the deployed values.
+The chart is coldstart's and knows nothing about Zomboid, so the cluster
+repository renders the two config files itself with `nixzoid.lib` — the same
+renderer the NixOS module uses, so the two deployments cannot drift into
+different spellings of the same setting — and mounts the result as a ConfigMap:
+
+```nix
+# in the cluster repository
+zomboidIni = inputs.nixzoid.lib.mkServerIni {
+  PublicName = "Knox County";
+  MaxPlayers = 16;
+  Mods = [ "tsarslib" "Brita_2" ];
+  WorkshopItems = [ "2392709985" "2857548524" ];
+};
+```
+
+with `ZOMBOID_CONFIG_FILE` pointed at the mount path, and the passwords coming
+through `env[].valueFrom.secretKeyRef` into a file the chart mounts for
+`ZOMBOID_CONFIG_SECRET_FILE`. See `apps/zomboid/values.yaml` in the cluster
+repository for the deployed values.
 
 The server is a single stateful Java process, so it is a one-replica Deployment
 with `strategy: Recreate` on a ReadWriteOnce volume — not a StatefulSet, which
@@ -109,6 +170,24 @@ Zomboid's ban list works on IP.
     stateDir = "/srv/zomboid";
     openFirewall = true;
     directConnectPorts = 16;
+
+    workshopItems = [ "2392709985" "2857548524" ];
+    mods = [ "tsarslib" "Brita_2" ];
+
+    settings = {
+      PublicName = "Knox County";
+      MaxPlayers = 16;
+      PVP = false;
+    };
+    sandbox = {
+      Zombies = 3;
+      ZombieLore.Speed = 2;
+    };
+
+    # Host paths, bind-mounted read-only. Never `settings` — that goes to the
+    # world-readable store.
+    adminPasswordFile = "/run/secrets/zomboid-admin";
+    secretConfigFile = "/run/secrets/zomboid-config";
   };
 }
 ```
