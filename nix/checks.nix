@@ -16,6 +16,36 @@
     let
       overlay = import ./overlay.nix;
 
+      format = import ../pkgs/zomboid-server/config-format.nix { inherit lib; };
+
+      # The server is x86_64-linux only, and these checks run wherever the
+      # developer is — so the package set under test is built explicitly rather
+      # than taken from `perSystem`. Nothing here is BUILT from it: every use
+      # below reads a `drvPath` or a `passthru` string.
+      linuxPkgs = import inputs.nixpkgs {
+        system = "x86_64-linux";
+        overlays = [
+          inputs.steam-fetcher.overlay
+          overlay
+        ];
+        config.allowUnfreePredicate =
+          pkg:
+          builtins.elem (lib.getName pkg) [
+            "zomboid-server"
+            "zomboid-server-unwrapped"
+            "steamworks-sdk-redist"
+          ];
+      };
+
+      # `passthru`, not the built output: building would pull ~7G of Steam
+      # depots into every `nix flake check`.
+      #
+      # The context has to be discarded as well. The script interpolates the
+      # unwrapped server's store path, so handing the string to a derivation
+      # makes that path an INPUT — and Nix then downloads both depots to build a
+      # check that only ever reads text.
+      launcherScript = builtins.unsafeDiscardStringContext linuxPkgs.zomboid-server.launcher;
+
       # The module, built the same way `flake.nixosModules.default` builds it —
       # but from the files rather than from this flake's outputs, so evaluating
       # it here cannot cycle.
@@ -44,25 +74,130 @@
     in
     {
       checks = {
+        # The one check here that RUNS the thing it tests. `zomboid-merge-ini`
+        # carries no game content, so it builds and executes on any platform —
+        # and the merge is the only real behaviour in this repository, the
+        # piece that decides whether a restart keeps or discards what the
+        # server wrote for itself.
+        merge-ini =
+          let
+            existing = pkgs.writeText "existing.ini" ''
+              # written by the server
+              PublicName=old name
+              MaxPlayers=8
+              Mods=
+              SteamPort1=8766
+            '';
+            # Every value here is a shape that a sed-based implementation
+            # mangles: a semicolon list, an "=" inside the value, a backslash,
+            # and an ampersand.
+            fragment = pkgs.writeText "fragment.ini" ''
+              MaxPlayers=32
+              Mods=tsarslib;Brita_2
+              PublicName=Knox & Co
+              ServerWelcomeMessage=a=b\c
+            '';
+          in
+          pkgs.runCommand "merge-ini" { nativeBuildInputs = [ pkgs.zomboid-merge-ini ]; } ''
+            fail() { echo "FAIL: $*" >&2; cat target.ini >&2; exit 1; }
+            has() { grep -qxF -- "$1" target.ini || fail "$2"; }
+            count() { [ "$(grep -c -- "$1" target.ini)" = "$2" ] || fail "$3"; }
+
+            cp ${existing} target.ini
+            chmod u+w target.ini
+            zomboid-merge-ini ${fragment} target.ini
+
+            has "MaxPlayers=32" "a declared key must replace the server's value"
+            has "Mods=tsarslib;Brita_2" "a semicolon-joined list must survive verbatim"
+            has "PublicName=Knox & Co" "an ampersand must not be treated as a replacement reference"
+            has 'ServerWelcomeMessage=a=b\c' "a value containing = and a backslash must survive verbatim"
+
+            # The whole point of merging rather than copying: a key the server
+            # keeps for itself is still there afterwards.
+            has "SteamPort1=8766" "an undeclared key must be left exactly as the server wrote it"
+            has "# written by the server" "comments must be preserved"
+
+            count "^MaxPlayers=" 1 "a replaced key must not also be appended"
+            count "^PublicName=" 1 "a replaced key must not also be appended"
+
+            # A fresh state directory has no file yet, and the first start must
+            # not fail on that.
+            rm -f fresh.ini
+            zomboid-merge-ini ${fragment} fresh.ini
+            grep -qxF -- "MaxPlayers=32" fresh.ini || { echo "FAIL: a missing target must be created" >&2; exit 1; }
+
+            # Idempotent: the launcher runs this on every start, and a second
+            # pass must not accumulate duplicates.
+            zomboid-merge-ini ${fragment} target.ini
+            count "^Mods=" 1 "merging twice must not duplicate a key"
+
+            touch $out
+          '';
+
+        # The two renderers. Both produce text the server parses with no error
+        # reporting worth the name: a boolean spelled "1" instead of "true" is
+        # read as a default, not as a mistake.
+        config-format =
+          let
+            ini = pkgs.writeText "rendered.ini" (
+              format.mkServerIni {
+                PVP = false;
+                PauseEmpty = true;
+                MaxPlayers = 16;
+                Mods = [
+                  "tsarslib"
+                  "Brita_2"
+                ];
+                WorkshopItems = [
+                  "2392709985"
+                  2857548524
+                ];
+                # Handed back to the server rather than managed.
+                RCONPassword = null;
+              }
+            );
+            sandbox = pkgs.writeText "rendered.lua" (
+              format.mkSandboxVars {
+                Zombies = 3;
+                XpMultiplier = 1.5;
+                ZombieLore = {
+                  Speed = 2;
+                };
+                Name = ''a "quoted" one'';
+              }
+            );
+          in
+          pkgs.runCommand "config-format" { } ''
+            fail() { echo "FAIL: $*" >&2; exit 1; }
+            ini() { grep -qxF -- "$1" ${ini} || { cat ${ini} >&2; fail "$2"; }; }
+            lua() { grep -qF -- "$1" ${sandbox} || { cat ${sandbox} >&2; fail "$2"; }; }
+
+            # `toString true` in Nix is "1", which the server reads as a
+            # default rather than as false.
+            ini "PVP=false" "booleans must render lowercase, not as 0/1"
+            ini "PauseEmpty=true" "booleans must render lowercase, not as 0/1"
+            ini "MaxPlayers=16" "integers render bare"
+
+            # The two halves of enabling a mod, in the separator the server
+            # splits on.
+            ini "Mods=tsarslib;Brita_2" "mod ids join with a semicolon"
+            ini "WorkshopItems=2392709985;2857548524" "workshop ids join with a semicolon, numbers included"
+
+            grep -q "^RCONPassword=" ${ini} && fail "a null value must drop the key, leaving it to the server"
+
+            lua "SandboxVars = {" "the file assigns the table the server reads"
+            lua "Zombies = 3," "integers render bare"
+            lua "ZombieLore = {" "nested sets become nested Lua tables"
+            lua 'Name = "a \"quoted\" one",' "quotes inside a string must be escaped"
+
+            touch $out
+          '';
+
         # Instantiation is the test: a bad `fetchSteam` argument, a missing
         # buildInput or a typo in the wrapper fails here, in seconds, without
         # fetching a byte of the game.
         packages-evaluate =
           let
-            linuxPkgs = import inputs.nixpkgs {
-              system = "x86_64-linux";
-              overlays = [
-                inputs.steam-fetcher.overlay
-                overlay
-              ];
-              config.allowUnfreePredicate =
-                pkg:
-                builtins.elem (lib.getName pkg) [
-                  "zomboid-server"
-                  "zomboid-server-unwrapped"
-                  "steamworks-sdk-redist"
-                ];
-            };
             drv = p: builtins.unsafeDiscardStringContext p.drvPath;
           in
           pkgs.runCommand "packages-evaluate" { } ''
@@ -91,24 +226,37 @@
         # server starts happily without -Djava.library.path and then dies on
         # the first dlopen, several seconds later, with an UnsatisfiedLinkError
         # that names a class rather than the flag.
+        # `writeShellApplication` runs shellcheck at BUILD time, and this
+        # launcher cannot be built without ~7G of Steam depots — so on a laptop,
+        # and in every check run, that lint never happens. A shell mistake in
+        # the launcher would surface only in the image workflow, an hour later,
+        # as a build failure with the game already downloaded.
+        #
+        # This lints the same text the same way, in a second, from `passthru`.
+        launcher-shellcheck =
+          pkgs.runCommand "launcher-shellcheck"
+            {
+              script = launcherScript;
+              passAsFile = [ "script" ];
+              nativeBuildInputs = [ pkgs.shellcheck ];
+            }
+            ''
+              # The preamble writeShellApplication prepends. Without it
+              # shellcheck lints a fragment with no shell dialect and no
+              # `set -u`, which is not what actually runs.
+              {
+                printf '#!/usr/bin/env bash\nset -o errexit\nset -o nounset\nset -o pipefail\n'
+                cat "$scriptPath"
+              } > launcher.sh
+
+              shellcheck launcher.sh
+
+              touch $out
+            '';
+
         launcher-arguments =
           let
-            linuxPkgs = import inputs.nixpkgs {
-              system = "x86_64-linux";
-              overlays = [
-                inputs.steam-fetcher.overlay
-                overlay
-              ];
-              config.allowUnfreePredicate = _: true;
-            };
-            # `passthru`, not the built output: building would pull ~7G of
-            # Steam depots into every `nix flake check`.
-            #
-            # The context has to be discarded as well. The script interpolates
-            # the unwrapped server's store path, so handing the string to a
-            # derivation makes that path an INPUT — and Nix then downloads both
-            # depots to build a check that only ever greps text.
-            script = builtins.unsafeDiscardStringContext linuxPkgs.zomboid-server.launcher;
+            script = launcherScript;
           in
           pkgs.runCommand "launcher-arguments"
             {
@@ -140,6 +288,35 @@
               # directories — one of them inside the store.
               has 'export HOME=' "HOME must be redirected alongside -cachedir="
 
+              # Config and mods arrive at runtime, never baked in. Baking them
+              # would put the mod list inside a ~7G image, so adding one mod
+              # would cost a rebuild and a re-push — the same reason the heap
+              # is an environment variable.
+              has 'ZOMBOID_CONFIG_FILE' "the server config has to be supplied at runtime, not built in"
+              has 'ZOMBOID_SANDBOX_FILE' "the sandbox settings have to be supplied at runtime"
+              has 'ZOMBOID_SERVER_NAME' "the server name has to be supplied at runtime"
+
+              # The secret fragment is applied AFTER the declarative one, or a
+              # store-rendered empty Password= would overwrite the real one.
+              frag=$(grep -n 'ZOMBOID_CONFIG_FILE' "$scriptPath" | head -1 | cut -d: -f1)
+              secret=$(grep -n 'ZOMBOID_CONFIG_SECRET_FILE' "$scriptPath" | head -1 | cut -d: -f1)
+              [ "$secret" -gt "$frag" ] \
+                || fail "the secret config fragment must be merged after the declarative one, or it loses to it"
+
+              # Merged, not copied. A copy would reset every option the server
+              # maintains for itself on each restart.
+              has 'zomboid-merge-ini' "the ini is merged into the server's own, not written over it"
+
+              # Without an admin password a FIRST start blocks on an
+              # interactive prompt that nothing in a container answers.
+              has 'ZOMBOID_ADMIN_PASSWORD_FILE' "a first start needs a non-interactive admin password"
+              has '-adminpassword' "the admin password reaches the server as a command-line argument"
+
+              # The launcher owns -servername, so the name the config files are
+              # called cannot drift from the name the server is told — the
+              # image entrypoint passes no arguments at all.
+              has '-servername' "the launcher supplies the server name itself"
+
               touch $out
             '';
 
@@ -156,9 +333,34 @@
                 directConnectPorts = 3;
                 openFirewall = true;
                 stateDir = "/srv/zomboid";
+
+                workshopItems = [
+                  "2392709985"
+                  "2857548524"
+                ];
+                mods = [
+                  "tsarslib"
+                  "Brita_2"
+                ];
+                settings = {
+                  MaxPlayers = 16;
+                  PVP = false;
+                };
+                sandbox.Zombies = 3;
+
+                adminPasswordFile = "/run/secrets/zomboid-admin";
+                secretConfigFile = "/run/secrets/zomboid-config";
               };
             };
             container = host.config.containers.zomboid;
+            env = container.config.systemd.services.zomboid.environment;
+
+            # Built, unlike everything else here — these are a few hundred
+            # bytes of text and carry no dependency on the depots. Reading them
+            # is what proves the module's options reach the running server
+            # rather than merely rendering somewhere.
+            renderedIni = env.ZOMBOID_CONFIG_FILE;
+            renderedSandbox = env.ZOMBOID_SANDBOX_FILE;
             # Context discarded for the same reason as in
             # `launcher-arguments`: `execStart` interpolates the server's store
             # path, and writing it into a derivation would make the ~7G of
@@ -171,8 +373,14 @@
                   bind = container.bindMounts."/var/lib/zomboid".hostPath;
                   execStart = container.config.systemd.services.zomboid.serviceConfig.ExecStart;
                   user = container.config.systemd.services.zomboid.serviceConfig.User;
-                  stateEnv = container.config.systemd.services.zomboid.environment.ZOMBOID_STATE_DIR;
+                  stateEnv = env.ZOMBOID_STATE_DIR;
+                  nameEnv = env.ZOMBOID_SERVER_NAME;
+                  secretEnv = env.ZOMBOID_CONFIG_SECRET_FILE;
+                  adminEnv = env.ZOMBOID_ADMIN_PASSWORD_FILE;
                   privateNetwork = container.privateNetwork;
+                  mounts = lib.mapAttrs (_: m: {
+                    inherit (m) hostPath isReadOnly;
+                  }) container.bindMounts;
                 }
               )
             );
@@ -202,13 +410,43 @@
                 "sharing the host netns by default — forwarding would rewrite the source address the ban list works on"
 
               case "$(get '.execStart')" in
-                *"-servername"*"apocalypse"*) ;;
-                *) fail "the configured server name never reaches the command line" ;;
-              esac
-              case "$(get '.execStart')" in
                 *"-port"*"17000"*) ;;
                 *) fail "the configured port never reaches the command line" ;;
               esac
+
+              # The name goes through the environment, not the command line, so
+              # that the image entrypoint — which takes no arguments — behaves
+              # the same as the systemd unit.
+              eq "apocalypse" "$(get '.nameEnv')" "the configured server name has to reach the launcher"
+
+              # Both halves of enabling a mod, in one file. Only one of them
+              # present is the failure that looks like the mod simply not
+              # working.
+              grep -qxF 'Mods=tsarslib;Brita_2' ${renderedIni} \
+                || { cat ${renderedIni} >&2; fail "the mod ids never reach the rendered config"; }
+              grep -qxF 'WorkshopItems=2392709985;2857548524' ${renderedIni} \
+                || { cat ${renderedIni} >&2; fail "the workshop ids never reach the rendered config"; }
+              grep -qxF 'MaxPlayers=16' ${renderedIni} \
+                || { cat ${renderedIni} >&2; fail "settings never reach the rendered config"; }
+              grep -qF 'Zombies = 3' ${renderedSandbox} \
+                || { cat ${renderedSandbox} >&2; fail "sandbox settings never reach the rendered lua"; }
+
+              # Secrets are passed by path and stay on the host. Rendering them
+              # into the ini would put them in the world-readable store.
+              eq "/run/secrets/zomboid-config" "$(get '.secretEnv')" "the secret fragment is passed by path"
+              eq "/run/secrets/zomboid-admin" "$(get '.adminEnv')" "the admin password is passed by path"
+              grep -q "run/secrets" ${renderedIni} && fail "a secret path must not be rendered into the store"
+
+              # coldstart merges extraContainerConfig with `//`, so declaring
+              # bindMounts there REPLACES its own. Losing the state mount would
+              # put the saves in the container's ephemeral root and a restart
+              # would quietly discard them.
+              eq "/srv/zomboid" "$(get '.mounts["/var/lib/zomboid"].hostPath')" \
+                "adding secret mounts must not drop the state mount"
+              eq "false" "$(get '.mounts["/var/lib/zomboid"].isReadOnly')" \
+                "the state mount stays writable"
+              eq "true" "$(get '.mounts["/run/secrets/zomboid-admin"].isReadOnly')" \
+                "secrets are mounted read-only"
 
               touch $out
             '';
