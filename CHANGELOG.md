@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/hcbt/nixzoid/compare/v0.2.1...v0.3.0) (2026-07-31)
+
+
+### Added
+
+* expose mods and server configuration ([#8](https://github.com/hcbt/nixzoid/issues/8)) ([4c0f6a2](https://github.com/hcbt/nixzoid/commit/4c0f6a2bc2b41d08ea5f5eea0c0d2b57557c5f35))
+
 ## [0.2.1](https://github.com/hcbt/nixzoid/compare/v0.2.0...v0.2.1) (2026-07-31)
 
 
