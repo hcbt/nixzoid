@@ -127,12 +127,12 @@
               has 'ZOMBOID_HEAP:-' "the heap has to be overridable at runtime, with the built-in value as the default"
               has "zombie.network.GameServer" "the server main class"
               has "-cachedir=" "state has to be redirected out of the read-only store"
-              has "steam_appid.txt" "the Steam API reads the app id from the working directory"
-              # media/ and the Lua tree are resolved against the CWD, so the
-              # install tree has to be reachable from the state directory. Without
-              # it the server dies deep in world load on a null Lua env, having
-              # logged an empty map-folder list and nothing about media/.
-              has 'ln -s "$entry"' "the install tree must be linked into the writable state dir"
+              # The server resolves its media through a scan rooted at the
+              # WORKING DIRECTORY, so that has to be the install root — the
+              # same thing upstream's start-server.sh does with `cd $INSTDIR`.
+              # Anywhere else and it starts, then dies deep in world load on a
+              # missing animation asset or a null worldgen table, naming no file.
+              has "cd /nix/store" "the working directory must be the install root, not the state dir"
               has "LD_LIBRARY_PATH" "steamclient.so is resolved through LD_LIBRARY_PATH"
 
               # HOME and -cachedir= must agree. The server resolves some paths
