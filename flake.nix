@@ -53,7 +53,31 @@
         ./nix/pkgs.nix # the `pkgs` this flake builds against
         ./nix/packages.nix # the server, and the OCI image
         ./nix/checks.nix
-        ./nix/shells.nix
+        # The dev shell, inline rather than imported from nix/shells.nix:
+        # editor Nix integrations that read flake.nix textually cannot see a
+        # devShell defined in an imported module, even though the flake output
+        # is identical either way.
+        (
+          # `nix develop` / direnv. nivis' mkDevShell brings prek, the treefmt wrapper,
+          # the pinned shell utilities and the pre-commit devShell fragment.
+          { ... }:
+          {
+            perSystem =
+              { pkgs, mkDevShell, ... }:
+              {
+                devShells.default = mkDevShell {
+                  packages = [
+                    # For reading depot metadata off Steam's API when bumping the
+                    # manifest ids — see pkgs/zomboid-server/default.nix.
+                    pkgs.jq
+                    pkgs.kubernetes-helm
+                    pkgs.kubectl
+                    pkgs.yq-go
+                  ];
+                };
+              };
+          }
+        )
         ./nix/format.nix
       ];
     };
