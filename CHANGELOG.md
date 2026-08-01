@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/hcbt/nixzoid/compare/v0.3.1...v0.3.2) (2026-08-01)
+
+
+### Fixed
+
+* **shell:** define the dev shell in flake.nix instead of nix/shells.nix ([#13](https://github.com/hcbt/nixzoid/issues/13)) ([d2081b3](https://github.com/hcbt/nixzoid/commit/d2081b31ceeb152ddb7b47fbe957cca3ac983af0))
+
 ## [0.3.1](https://github.com/hcbt/nixzoid/compare/v0.3.0...v0.3.1) (2026-08-01)
 
 
