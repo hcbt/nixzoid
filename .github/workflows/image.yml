@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   image:
-    uses: hcbt/coldstart/.github/workflows/build-push-image.yml@v0.3.0
+    uses: hcbt/coldstart/.github/workflows/build-push-image.yml@v0.3.1
     with:
       package: zomboid-image
       image: ghcr.io/hcbt/nixzoid

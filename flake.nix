@@ -4,7 +4,7 @@
   inputs = {
     # The shared scaffolding: treefmt, the git hooks, mkDevShell, the app
     # helpers, and the generated GitHub-side files.
-    nivis.url = "github:hcbt/nivis/v0.8.1";
+    nivis.url = "github:hcbt/nivis/v0.8.2";
 
     # flake-parts builds `pkgs` from the CONSUMING flake's own nixpkgs input,
     # so this cannot be dropped.
@@ -14,7 +14,7 @@
     # systemd-nspawn NixOS container. Everything here is the Zomboid-specific
     # remainder.
     coldstart = {
-      url = "github:hcbt/coldstart/v0.3.0";
+      url = "github:hcbt/coldstart/v0.3.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
