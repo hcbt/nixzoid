@@ -6,5 +6,8 @@ result-*
 # written by prek when the dev shell is entered
 .pre-commit-config.yaml
 
+# per-machine Claude Code state, not shared configuration
+.claude/settings.local.json
+
 # devenv, if a shell ever uses it here
 .devenv
