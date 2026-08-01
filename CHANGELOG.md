@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/hcbt/nixzoid/compare/v0.3.0...v0.3.1) (2026-08-01)
+
+
+### Fixed
+
+* **deps:** bump nivis to v0.8.2 and coldstart to v0.3.1 ([#11](https://github.com/hcbt/nixzoid/issues/11)) ([6c569d1](https://github.com/hcbt/nixzoid/commit/6c569d10c34e279bc83aeedbe5599087d89f2e75))
+
 ## [0.3.0](https://github.com/hcbt/nixzoid/compare/v0.2.1...v0.3.0) (2026-07-31)
 
 
