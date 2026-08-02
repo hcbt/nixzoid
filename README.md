@@ -18,42 +18,94 @@ have.
 ## What it does
 
 ```
-nix build .#zomboid-server    # the launcher, runnable on any x86_64 Linux host
-nix build .#zomboid-image     # the OCI image the cluster runs
+nix run   github:hcbt/nixzoid   # start a server here, on this machine
+nix build .#zomboid-server      # the launcher
+nix build .#zomboid-image       # the OCI image the cluster runs
 ```
 
+The server runs on **`x86_64-linux`** and **`aarch64-darwin`**. The image is
 Linux only, and honestly absent elsewhere rather than evaluating everywhere and
-building in one place: DepotDownloader and `dockerTools` both need it.
+building in one place: `dockerTools` cannot build a Linux image from Darwin.
+
+### Running one without a deployment
+
+Everything the server needs can be given on the command line, which is what
+makes a one-off server a single command:
+
+```bash
+nix run github:hcbt/nixzoid -- --name knox --mod tsarslib --set MaxPlayers=16 --sandbox Zombies=3
+```
+
+| Flag                          | What                                             |
+| ----------------------------- | ------------------------------------------------ |
+| `--name` `--state` `--heap`   | Server name, where saves live, JVM heap          |
+| `--set K=V`                   | One `<name>.ini` key, repeatable                 |
+| `--mod ID` / `--workshop ID`  | Appended to `Mods` / `WorkshopItems`, repeatable |
+| `--sandbox K=V`               | One `SandboxVars` key. A dotted key nests        |
+| `--config` / `--sandbox-file` | Whole files, for anything the flags do not cover |
+| `--print-config`              | Render the config, print it, and do not start    |
+
+Every flag has an environment variable as well, and `--help` names both. The
+flag wins. State defaults to `~/Zomboid` on macOS and `/data` on Linux.
+
+`--set` and friends go through `zomboid-render-config`, which produces the same
+two files `nixzoid.lib.mkServerIni` and `mkSandboxVars` produce for the NixOS
+module and the Helm values. `checks.render-config` diffs the two renderers byte
+for byte, so a flag and a declared option cannot drift into different spellings
+of one setting.
 
 ## Getting the game
 
-App **380870** splits the dedicated server across two depots, and both are
-required:
+App **380870** splits the dedicated server across a shared depot and one per
+platform. Two of the three are always required:
 
-| Depot    | What                                                                                          | Size           |
-| -------- | --------------------------------------------------------------------------------------------- | -------------- |
-| `380871` | Platform-independent content — `java/projectzomboid.jar`, `media/`, the Lua stdlib            | ~6.9G unpacked |
-| `380873` | The Linux half — the bundled Azul Zulu JRE, the JNI natives in `linux64/`, the pzexe launcher | ~218M          |
+| Depot    | What                                                                                               | Size           |
+| -------- | -------------------------------------------------------------------------------------------------- | -------------- |
+| `380871` | Platform-independent content — `java/projectzomboid.jar`, `media/`, the Lua stdlib                 | ~6.9G unpacked |
+| `380873` | The Linux half — the bundled Azul Zulu JRE, the JNI natives in `linux64/`, the pzexe launcher      | ~218M          |
+| `380872` | The macOS half — an arm64 Azul Zulu JRE under `jre/Contents/Home`, universal natives in `natives/` | ~205M          |
 
-Neither is useful alone: the jar is the server, and the natives are what it
+Neither half is useful alone: the jar is the server, and the natives are what it
 `dlopen()`s on startup. Access is anonymous, so no Steam credentials are
 involved anywhere.
+
+There is no `x86_64-darwin`. The macOS depot's `java` is a thin arm64 Mach-O, so
+an Intel Mac has no JVM to run — even though the PZ natives beside it are
+universal.
 
 ### Updating to a new build
 
 `manifestId` pins an exact build, which is the only way a Steam fetch can be a
-fixed-output derivation — "whatever is current" has no hash. Steam's own
-metadata API lists them:
+fixed-output derivation — "whatever is current" has no hash. All three move
+together, because all three come out of one app build. Steam's own metadata API
+lists them:
 
 ```bash
-curl -s https://api.steamcmd.net/v1/info/380870 | jq '.data["380870"].depots | {"380871","380873"} | map_values(.manifests.public.gid)'
+curl -s https://api.steamcmd.net/v1/info/380870 | jq '.data["380870"].depots | {"380871","380872","380873"} | map_values(.manifests.public.gid)'
 ```
 
 Put the new gids in [`pkgs/zomboid-server/default.nix`](pkgs/zomboid-server/default.nix),
-set both hashes to `sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`, and
+set the hashes to `sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`, and
 build — Nix reports the real hash. There is no way to compute one without
-downloading, and DepotDownloader only runs on Linux, so this is a Linux-host
-operation.
+downloading, and a host can only fetch the depot it has a `fetchSteam` call for,
+so bumping all three takes one build on Linux and one on macOS.
+
+### Why DepotDownloader is patched
+
+`nix/overlay.nix` carries a darwin-only patch to `depotdownloader`, and without
+it no depot can be fetched on a Mac at all.
+
+`AccountSettingsStore` opens an `IsolatedStorageFile` in a **static field**, so
+it is constructed before `Main` reads a flag. That resolves
+`SpecialFolder.ApplicationData`, and on macOS .NET takes the home directory from
+**passwd**, not from `$HOME` — point `HOME` at a scratch directory and the store
+still appears under the real one. A Nix build user's passwd home is
+`/var/empty`, so the constructor throws and the process aborts. This is why
+`fetch-steam`'s own `HOME=$(mktemp -d)` works on Linux and does nothing here.
+
+The store only caches credentials and a content-server penalty list, and
+`fetchSteam` logs in anonymously into a build directory that is then discarded.
+The patch points those three calls at plain files instead.
 
 ## Making it run
 
@@ -63,9 +115,13 @@ None of that survives the Nix store: the install directory is read-only, and
 every path in that json — the classpath, `-Djava.library.path`, even the heap
 size — is relative to a working directory the server may no longer write to.
 
-So the wrapper skips both and invokes the JVM directly with absolute paths,
-carrying exactly the arguments upstream specified. Three of them are worth
-knowing about, because getting any wrong produces a server that _starts_:
+macOS ships `StartServer.command` instead, which does the same thing with
+different paths and a different set of JVM flags.
+
+So the wrapper skips all of it and invokes the JVM directly with absolute paths,
+carrying exactly the arguments upstream specified for the platform. Three of
+them are worth knowing about, because getting any wrong produces a server that
+_starts_:
 
 - **`-Djava.library.path`** — without it the server runs for several seconds and
   then dies on the first `dlopen` with an `UnsatisfiedLinkError` naming a class
@@ -77,20 +133,55 @@ knowing about, because getting any wrong produces a server that _starts_:
 - **`-cachedir=` _and_ `HOME`** — the server resolves some paths from each. Set
   only one and state scatters across two directories, one of them in the store.
 
-`checks.launcher-arguments` asserts on all of them, because every one of those
-failures costs a full server start to discover.
+What differs by platform:
+
+|              | Linux             | macOS                        |
+| ------------ | ----------------- | ---------------------------- |
+| JVM          | `jre64/bin/java`  | `jre/Contents/Home/bin/java` |
+| Natives      | `linux64/`        | `natives/`                   |
+| Library path | `LD_LIBRARY_PATH` | `DYLD_LIBRARY_PATH`          |
+| Collector    | `-XX:+UseZGC`     | whatever the JVM defaults to |
+| Extra flag   | —                 | `-XstartOnFirstThread`       |
+| Steam        | on                | off — see below              |
+
+`checks.launcher-arguments` asserts on all of it, for **both** scripts, because
+every one of those failures costs a full server start to discover.
+
+### macOS has no Steam networking
+
+The Steamworks redist has a macOS depot, `1005`, and Steam will not give it to
+an anonymous account:
+
+```
+Depot 1005 is not available from this account.
+```
+
+So there is no `steamclient.dylib` to ship, and macOS defaults to
+`-Dzomboid.steam=0`. The server then runs on `libZNetNoSteam.dylib`: it works,
+it keeps saves, and mods load — but it does not register with the Steam master
+server, so it never appears in the in-game browser and players reach it by
+direct connection only.
+
+A Mac that has Steam installed already has the library. Point
+`ZOMBOID_STEAMCLIENT_DIR` at the directory holding it and pass `--steam`; no
+rebuild is involved.
 
 ## Configuring it
 
-Mods and server settings arrive at **runtime, through the environment**. None of
-it is baked into the package — that derivation carries ~7G of Steam depots, so a
-mod list built into it would make adding one mod a full image rebuild and
-re-push. Same reason the heap is an environment variable.
+Mods and server settings arrive at **runtime**, through a flag or through the
+environment. None of it is baked into the package — that derivation carries ~7G
+of Steam depots, so a mod list built into it would make adding one mod a full
+image rebuild and re-push. Same reason the heap is an environment variable.
+
+Every variable below has a flag; see [Running one without a
+deployment](#running-one-without-a-deployment). The flag wins.
 
 | Variable                      | What                                                     |
 | ----------------------------- | -------------------------------------------------------- |
-| `ZOMBOID_STATE_DIR`           | Saves, config and logs (`/data`)                         |
+| `ZOMBOID_STATE_DIR`           | Saves, config and logs (`/data`, `~/Zomboid` on macOS)   |
 | `ZOMBOID_HEAP`                | JVM heap (`8g`)                                          |
+| `ZOMBOID_STEAM`               | `1` or `0`, the Steam networking stack                   |
+| `ZOMBOID_STEAMCLIENT_DIR`     | A directory holding `steamclient.so` / `.dylib`          |
 | `ZOMBOID_SERVER_NAME`         | Names the config files, and `-servername` (`servertest`) |
 | `ZOMBOID_CONFIG_FILE`         | `<name>.ini` fragment, merged key by key                 |
 | `ZOMBOID_CONFIG_SECRET_FILE`  | The same, applied after — `Password`, `RCONPassword`     |
@@ -218,5 +309,10 @@ operation; what is checked is everything that can go wrong without the game
 content — that the derivations instantiate, that the launcher carries the right
 arguments, and that the NixOS module wires the container correctly.
 `nix build .#zomboid-image` is what proves the heavy half works.
+
+Both platforms are checked **from either one**. The launcher checks read a
+`passthru` string with its context discarded, so the macOS assertions run on the
+Linux CI runner and the Linux ones run on a laptop, and neither downloads a
+byte. Only an actual `nix build` of the server needs the matching host.
 
 New files must be `git add`ed before any `nix` command sees them.

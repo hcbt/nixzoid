@@ -1,29 +1,41 @@
 # The server, and the OCI image the cluster runs.
 #
-#   nix build .#zomboid-server     the launcher, runnable on any Linux host
+#   nix run  .#                    start a server here, on this machine
+#   nix build .#zomboid-server     the launcher, on x86_64-linux or aarch64-darwin
 #   nix build .#zomboid-image      the image, pushed to GHCR by CI
 #
-# Linux only. DepotDownloader is the smaller reason; the real one is that
-# dockerTools cannot build a Linux image from Darwin, and a package that
-# evaluates everywhere but builds in one place is worse than one that is
-# honestly absent.
+# The server exists wherever `pkgs/zomboid-server/default.nix` has a Steam
+# depot for the system. The IMAGE stays Linux-only: dockerTools cannot build a
+# Linux image from Darwin, and a package that evaluates everywhere but builds
+# in one place is worse than one that is honestly absent.
 { inputs, ... }:
 {
   imports = [ inputs.coldstart.flakeModules.default ];
 
-  # The Linux guard is applied to each attribute's VALUE, never to the module's
-  # definition set. `perSystem = { pkgs, ... }: lib.optionalAttrs …` would make
-  # *which options exist* depend on `pkgs` — and `pkgs` is itself a module
-  # argument, so the module system cannot decide what is declared without
-  # already having it. That is an infinite recursion, and it reports itself as
-  # `_module.args` in lib/modules.nix with nothing pointing back here.
+  # The platform guard is applied to each attribute's VALUE, never to the
+  # module's definition set. `perSystem = { pkgs, ... }: lib.optionalAttrs …`
+  # would make *which options exist* depend on `pkgs` — and `pkgs` is itself a
+  # module argument, so the module system cannot decide what is declared
+  # without already having it. That is an infinite recursion, and it reports
+  # itself as `_module.args` in lib/modules.nix with nothing pointing back
+  # here.
   perSystem =
-    { pkgs, lib, ... }:
+    {
+      pkgs,
+      lib,
+      system,
+      ...
+    }:
     let
       onLinux = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux;
+
+      # `meta.platforms` of the unwrapped server is the depot table's key set,
+      # so this asks the package itself rather than repeating the list. Adding
+      # a depot in `default.nix` is then the only edit an extra platform needs.
+      onSupported = lib.optionalAttrs (lib.elem system pkgs.zomboid-server-unwrapped.meta.platforms);
     in
     {
-      packages = onLinux {
+      packages = onSupported {
         inherit (pkgs) zomboid-server zomboid-server-unwrapped;
         default = pkgs.zomboid-server;
       };

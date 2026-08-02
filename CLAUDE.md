@@ -7,12 +7,17 @@ Zomboid-shaped remainder.
 
 ## Layout
 
-- `pkgs/zomboid-server/default.nix` — the two Steam depots, merged and
-  autoPatchelf'd. This is the ~7G half.
+- `pkgs/zomboid-server/default.nix` — the shared Steam depot plus the platform
+  one, merged, and autoPatchelf'd on Linux. This is the ~7G half.
 - `pkgs/zomboid-server/wrapper.nix` — the launcher. Replaces upstream's
-  `start-server.sh` + `ProjectZomboid64.json`, which cannot work from a
-  read-only store. Also the whole runtime interface: every `ZOMBOID_*` variable
+  `start-server.sh` + `ProjectZomboid64.json` on Linux and
+  `StartServer.command` on macOS, none of which work from a read-only store.
+  Also the whole runtime interface: every `ZOMBOID_*` variable and every flag
   is documented at the top of it.
+- `pkgs/zomboid-server/render-config.nix` — the same two files as
+  `config-format.nix`, rendered from FLAGS at runtime instead of from Nix at
+  evaluation time. `nix run … -- --mod x` has no evaluation left when the flag
+  is read. `checks.render-config` diffs the two renderers.
 - `pkgs/zomboid-server/config-format.nix` — renders `<name>.ini` and
   `<name>_SandboxVars.lua`. A pure function of `lib`, exported as
   `flake.lib`, so the NixOS module and the cluster repository's Helm values go
@@ -72,9 +77,26 @@ Zomboid-shaped remainder.
 - **`fetchSteam` needs `manifestId`, not a version.** A Steam fetch can only be
   a fixed-output derivation against an exact build; there is no "latest" that
   has a hash.
-- **Hashes can only be obtained on Linux**, by building with a wrong hash and
-  reading the reported one. DepotDownloader does not run on darwin in this
-  configuration, and `nix flake check` on a laptop never exercises this path.
+- **A hash can only be obtained on the platform whose depot it is**, by
+  building with a wrong hash and reading the reported one. `nix flake check`
+  never exercises this path on either host.
+- **DepotDownloader cannot run inside a Nix build on darwin unpatched.**
+  `AccountSettingsStore` opens an `IsolatedStorageFile` in a STATIC field, and
+  on macOS .NET resolves the home directory from PASSWD rather than from
+  `$HOME` — a build user's is `/var/empty`, so it throws before `Main` reads a
+  flag. `nix/overlay.nix` patches it, darwin-only. The binary itself runs fine
+  interactively, which makes this easy to misdiagnose: the failure is the
+  sandbox's home directory, not the tool.
+- **macOS runs the server without Steam networking.** Depot 1005, the macOS
+  Steamworks redist, is not available to an anonymous account, so there is no
+  `steamclient.dylib` to ship and `-Dzomboid.steam` defaults to 0 there. The
+  server works and is reachable by direct connection, but never appears in the
+  in-game browser.
+- **Do not patch a Mach-O, and do not let anything strip one.** Every binary in
+  the macOS depot is signed — ad-hoc on the PZ natives, an Azul certificate
+  with the hardened runtime on the JRE. `strip` invalidates the signature and
+  macOS then kills the process without naming a file. `dontStrip` is set on
+  darwin for that reason, and nothing there needs patching anyway.
 
 ## Shared scaffolding
 
@@ -93,3 +115,8 @@ The dev shell, treefmt, the git hooks and the GitHub-side files come from
 - New files must be `git add`ed before any `nix` command sees them.
 - `nix flake check` on darwin omits every Linux-only output. Verify an image or
   packaging change on x86_64-linux before claiming it works.
+- **The launcher checks cover both platforms from either host.** They read a
+  `passthru` string with its context discarded, so a Linux runner asserts on
+  the macOS script and a laptop asserts on the Linux one. Adding a
+  platform-specific argument means adding it to the per-platform block in
+  `checks.launcher-arguments`, not just to `wrapper.nix`.
