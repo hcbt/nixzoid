@@ -44,13 +44,16 @@ server. There is no second step and no Steam account involved.
 | `--name` `--state` `--heap`   | Server name, where saves live, JVM heap            |
 | `--set K=V`                   | One `<name>.ini` key, repeatable                   |
 | `--workshop ID[,ID...]`       | Download Workshop items, install them, enable them |
-| `--mod ID[,ID...]`            | Enable already-installed mods. Rarely needed       |
+| `--mod ID[,ID...]`            | Enable already-installed mods. Seldom needed       |
 | `--sandbox K=V`               | One `SandboxVars` key. A dotted key nests          |
 | `--config` / `--sandbox-file` | Whole files, for anything the flags do not cover   |
 | `--print-config`              | Render the config, print it, and do not start      |
 
-Every flag has an environment variable as well, and `--help` names both. The
-flag wins. State defaults to `~/Zomboid` on macOS and `/data` on Linux.
+Most flags have an environment variable as well, and `--help` names it in
+brackets where there is one. The flag wins. `--set`, `--mod`, `--sandbox` and
+`--print-config` are flags only — a deployment supplies those through
+`--config` and `--sandbox-file`. State defaults to `~/Zomboid` on macOS and
+`/data` on Linux.
 
 `--set` and friends go through `zomboid-render-config`, which produces the same
 two files `nixzoid.lib.mkServerIni` and `mkSandboxVars` produce for the NixOS
@@ -258,14 +261,39 @@ server with Steam on would fetch each item a second time through Steam, and
 `modFoldersOrder` is `workshop,steam,mods` — so the Steam copy would win, at
 whatever version Steam has.
 
+#### When you still need `--mod`
+
+`--workshop` enables what it installs, so `--mod` is not part of the usual
+command. Two things still need it:
+
+- **A mod you placed under `<state>/mods` yourself.** It has no Workshop id to
+  name it by.
+- **Load order.** `Mods=` loads in the order given, and a library has to come
+  before whatever requires it. Ids from `--mod` lead, and one already coming
+  from `--workshop` is not repeated:
+
+  ```
+  --workshop a,b                    → Mods=FromA;FromB
+  --mod FromB --workshop a,b        → Mods=FromB;FromA
+  ```
+
+`--mod` only adds. It cannot exclude one mod from a Workshop item that ships
+several.
+
 #### `WorkshopItems=` — the server downloads it
 
-The original path, still there, still Linux-only in practice because it needs
-Steam. `WorkshopItems=` and `Mods=` are then **two separate keys and both are
-required** — one says what to fetch, the other what to load. Only the first, and
-the server downloads mods it never enables; only the second, and it enables mods
-it never downloaded. Neither failure says anything useful in the log, so the
-module warns when one is set without the other.
+The old path. It asks the **server** to fetch through Steam, which is a second
+downloader for one job, so nothing in this repository sets it any more — not
+`--workshop`, not `services.zomboid.workshopItems`, and `zomboid-render-config`
+has no flag for it.
+
+It is still reachable, deliberately, with `--set WorkshopItems=a;b` or through
+`settings`. Two warnings if you do: it does not work on macOS at all, and
+running it alongside `--workshop` downloads every item twice at possibly
+different versions — `modFoldersOrder` is `workshop,steam,mods`, so the
+server's copy wins. Used that way, `WorkshopItems=` and `Mods=` are **two
+separate keys and both are required**: one says what to fetch, the other what
+to load.
 
 #### Build 42 changed the mod layout
 
@@ -296,8 +324,6 @@ different spellings of the same setting — and mounts the result as a ConfigMap
 zomboidIni = inputs.nixzoid.lib.mkServerIni {
   PublicName = "Knox County";
   MaxPlayers = 16;
-  Mods = [ "tsarslib" "Brita_2" ];
-  WorkshopItems = [ "2392709985" "2857548524" ];
 };
 ```
 
@@ -305,6 +331,12 @@ with `ZOMBOID_CONFIG_FILE` pointed at the mount path, and the passwords coming
 through `env[].valueFrom.secretKeyRef` into a file the chart mounts for
 `ZOMBOID_CONFIG_SECRET_FILE`. See `apps/zomboid/values.yaml` in the cluster
 repository for the deployed values.
+
+Mods do **not** go in that ConfigMap. Set `ZOMBOID_WORKSHOP_ITEMS` in the pod
+environment instead — `"2392709985 2857548524"` — and the launcher downloads
+and enables them on start, the same way it does everywhere else. This is why
+the image carries DepotDownloader and the .NET runtime it needs, ~128M on top
+of ~7G of game content.
 
 The server is a single stateful Java process, so it is a one-replica Deployment
 with `strategy: Recreate` on a ReadWriteOnce volume — not a StatefulSet, which
@@ -329,8 +361,9 @@ Zomboid's ban list works on IP.
     openFirewall = true;
     directConnectPorts = 16;
 
+    # Downloaded on start by the launcher, with DepotDownloader, and enabled
+    # on their own. `mods` is only for a hand-placed mod or to fix load order.
     workshopItems = [ "2392709985" "2857548524" ];
-    mods = [ "tsarslib" "Brita_2" ];
 
     settings = {
       PublicName = "Knox County";

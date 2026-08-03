@@ -1,7 +1,6 @@
 # Renders the server's two config files from COMMAND-LINE flags.
 #
-#   zomboid-render-config --out DIR [--set K=V] [--mod ID] [--workshop ID]
-#                                   [--sandbox K=V]
+#   zomboid-render-config --out DIR [--set K=V] [--mod ID] [--sandbox K=V]
 #
 # Writes `DIR/fragment.ini` and `DIR/SandboxVars.lua`, each only when at least
 # one flag feeds it. The launcher then points `ZOMBOID_CONFIG_FILE` and
@@ -51,9 +50,13 @@ writeShellApplication {
       --out DIR            where to write fragment.ini and SandboxVars.lua
       --set KEY=VALUE      one <name>.ini key, repeatable
       --mod ID[,ID...]     append to Mods. A list, and repeatable
-      --workshop ID[,ID...] append to WorkshopItems. A list, and repeatable
       --sandbox KEY=VALUE  one SandboxVars key, repeatable.
                            A dotted KEY nests: ZombieLore.Speed=2
+
+    There is no --workshop here. Workshop items are DOWNLOADED, by
+    `zomboid-workshop`, and the mod ids it reports come back through --mod.
+    `WorkshopItems=` asks the SERVER to download through Steam, which is a
+    second mechanism for one job — reachable with --set if you want it.
     EOF
       exit 2
     }
@@ -81,7 +84,6 @@ writeShellApplication {
     out=""
     ini=()
     mods=()
-    workshop=()
     sandbox=()
 
     while [ "$#" -gt 0 ]; do
@@ -94,11 +96,12 @@ writeShellApplication {
           mods+=(''${parts[@]+"''${parts[@]}"})
           shift 2
           ;;
+        # Named explicitly rather than falling into `unknown option`, because
+        # this flag USED to exist here and meant the opposite of the launcher's
+        # flag of the same name: this one asked the server to download through
+        # Steam, that one downloads with DepotDownloader.
         --workshop)
-          [ "$#" -ge 2 ] || die "--workshop needs an id"
-          split "$2"
-          workshop+=(''${parts[@]+"''${parts[@]}"})
-          shift 2
+          die "--workshop is not a render-config option. Workshop items are downloaded by zomboid-workshop, and its mod ids arrive here as --mod. To ask the server to download them through Steam instead, spell it out: --set WorkshopItems=a;b"
           ;;
         --sandbox) [ "$#" -ge 2 ] || die "--sandbox needs KEY=VALUE"; pair "$2" --sandbox; sandbox+=("$2"); shift 2 ;;
         -h|--help) usage ;;
@@ -120,7 +123,6 @@ writeShellApplication {
       done
     }
     [ ''${#mods[@]} -eq 0 ] || conflict Mods --mod
-    [ ''${#workshop[@]} -eq 0 ] || conflict WorkshopItems --workshop
 
     # Semicolons, the separator the server splits on — the same join
     # `config-format.nix` does for a Nix list.
@@ -129,7 +131,6 @@ writeShellApplication {
       echo "$*"
     }
     [ ''${#mods[@]} -eq 0 ] || ini+=("Mods=$(join "''${mods[@]}")")
-    [ ''${#workshop[@]} -eq 0 ] || ini+=("WorkshopItems=$(join "''${workshop[@]}")")
 
     # ---- <name>.ini ----------------------------------------------------
     #

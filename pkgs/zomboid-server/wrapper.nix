@@ -168,8 +168,10 @@ let
       cat >&2 <<'EOF'
     usage: zomboid-server [options] [-- server arguments]
 
-    Every option below also has an environment variable, named in brackets.
-    The flag wins.
+    Where an option names a variable in brackets, the environment can set it
+    too and the flag wins. The options that name none — --set, --mod,
+    --sandbox and --print-config — are flags only; a deployment supplies
+    those through --config and --sandbox-file instead.
 
       --name NAME              server name, and the name of its config files
                                [ZOMBOID_SERVER_NAME]
@@ -183,7 +185,11 @@ let
                                enable every mod they carry. A comma-separated
                                list, and repeatable [ZOMBOID_WORKSHOP_ITEMS]
       --mod ID[,ID...]         enable mods that are already installed. A list,
-                               and repeatable. Not needed alongside --workshop
+                               and repeatable. --workshop enables what it
+                               downloads on its own, so this is for a mod put
+                               under <state>/mods by hand, or to pull one
+                               ahead of the rest — Mods= loads in order, and a
+                               library has to come before what needs it
       --offline                reuse what --workshop already downloaded and
                                contact Steam for nothing [ZOMBOID_WORKSHOP_OFFLINE]
       --sandbox KEY=VALUE      one SandboxVars key, repeatable.
@@ -229,7 +235,20 @@ let
     # that cannot be built without ~7G of Steam depots.
     workshop=()
     [ -n "''${ZOMBOID_WORKSHOP_ITEMS:-}" ] && workshop+=("$ZOMBOID_WORKSHOP_ITEMS")
-    offline="''${ZOMBOID_WORKSHOP_OFFLINE:-0}"
+
+    # Spelled out rather than compared to 1. `ZOMBOID_WORKSHOP_OFFLINE=true` is
+    # what a Helm values file or a systemd unit naturally carries, and a test
+    # for exactly "1" would treat it as off — leaving the one variable whose
+    # whole job is "do not contact Steam" silently contacting Steam.
+    case "''${ZOMBOID_WORKSHOP_OFFLINE:-0}" in
+      1 | true | TRUE | True | yes | YES | on) offline=1 ;;
+      0 | false | FALSE | False | no | NO | off | "") offline=0 ;;
+      *) die "ZOMBOID_WORKSHOP_OFFLINE must be a boolean, got '$ZOMBOID_WORKSHOP_OFFLINE'" ;;
+    esac
+    # Whether --offline was asked for explicitly, as opposed to inherited from
+    # the environment. Only the explicit form is worth a message when it turns
+    # out to have nothing to act on.
+    offlineAsked=0
 
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -242,7 +261,7 @@ let
           need "$1" "$#"; render+=("$1" "$2"); shift 2 ;;
         # NOT passed to the renderer. This one downloads.
         --workshop) need "$1" "$#"; workshop+=("$2"); shift 2 ;;
-        --offline) offline=1; shift ;;
+        --offline) offline=1; offlineAsked=1; shift ;;
         --config) need "$1" "$#"; config=$2; shift 2 ;;
         --secret-config) need "$1" "$#"; secret=$2; shift 2 ;;
         --sandbox-file) need "$1" "$#"; sandboxFile=$2; shift 2 ;;
@@ -293,6 +312,13 @@ let
     # this start rather than state, and a stray fragment.ini beside the saves
     # reads like something the server wrote.
     work=$(mktemp -d)
+
+    # `--offline` only means anything to the workshop step. Silently accepting
+    # it otherwise leaves someone believing the start avoided the network for a
+    # reason it never had.
+    if [ "$offlineAsked" = 1 ] && [ ''${#workshop[@]} -eq 0 ]; then
+      echo "zomboid-server: --offline has no effect, because no workshop items were given" >&2
+    fi
 
     if [ ''${#workshop[@]} -gt 0 ]; then
       args=(--cache "$state/workshop" --mods-dir "$state/mods")

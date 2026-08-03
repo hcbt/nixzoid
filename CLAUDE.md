@@ -26,8 +26,8 @@ Zomboid-shaped remainder.
   `flake.lib`, so the NixOS module and the cluster repository's Helm values go
   through the same renderer.
 - `pkgs/zomboid-server/merge-ini.nix` — applies a declared ini fragment over
-  the one the server maintains. The only real behaviour here, and the only
-  check that runs rather than evaluates.
+  the one the server maintains. Decides whether a restart keeps or discards
+  what the server wrote for itself.
 - `nix/overlay.nix` — the overlay, in its own file so checks can apply it
   without going through `inputs.self`.
 - `nix/nixos-module.nix` — `services.zomboid`, on top of coldstart's container.
@@ -107,11 +107,21 @@ Zomboid-shaped remainder.
   `zomboid-workshop` and `zomboid-render-config`, not by the launcher — the
   launcher cannot be built without ~7G of depots, so logic put there gets no
   test. `--set` and `--sandbox` must never split: their values are free text.
-- **The server cannot download mods on macOS, so the launcher does it.**
-  `--workshop` runs DepotDownloader (`-app 108600 -pubfile <id>`, anonymous)
-  and installs into `$state/mods`. It must NOT also write `WorkshopItems=`:
-  with Steam on, the server would fetch each item again and
-  `modFoldersOrder = workshop,steam,mods` puts its copy first.
+- **One downloader for mods, everywhere: DepotDownloader.** `--workshop` and
+  `services.zomboid.workshopItems` both go through `zomboid-workshop`
+  (`-app 108600 -pubfile <id>`, anonymous) into `$state/mods`. NOTHING here
+  writes `WorkshopItems=` any more — that asks the SERVER to fetch through
+  Steam, and running both downloads each item twice at possibly different
+  versions with `modFoldersOrder = workshop,steam,mods` picking the server's.
+  `--set WorkshopItems=` stays reachable on purpose; it is not the mechanism.
+- **`--workshop` is the launcher's flag and nothing else's.** It used to exist
+  on `zomboid-render-config` meaning the OPPOSITE — write `WorkshopItems=`.
+  That flag now dies with a message naming `zomboid-workshop`, because two
+  flags of one name doing opposite things is worse than an unknown option.
+- **The image carries DepotDownloader and .NET, ~128M.** That is the price of
+  the line above: without it `ZOMBOID_WORKSHOP_ITEMS` is an option the Helm
+  values can set and the container cannot honour. Do not "optimise" it out
+  without removing the option too.
 - **Build 42 wants `mod.info` in `<mod>/common/` or `<mod>/42/`, never at the
   mod root.** `getAllModFoldersAux` skips a non-matching folder with NO
   message, which surfaces as `required mod "x" not found` for a mod that is on

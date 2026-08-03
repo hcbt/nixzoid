@@ -3,9 +3,15 @@
 # Deliberately NONE of these build the server. The two Steam depots are ~7G
 # unpacked, and a check that downloaded them would make `nix flake check` an
 # hour-long operation on every commit and every CI run. What is checked here is
-# everything that can go wrong WITHOUT the game content: that the derivations
-# instantiate, that the launcher's arguments are the ones upstream specifies,
-# and that the NixOS module wires the container correctly.
+# everything that can go wrong WITHOUT the game content:
+#
+#   - that the derivations instantiate, on both platforms (`packages-evaluate`)
+#   - that each launcher carries the arguments upstream specifies, on both
+#     platforms (`launcher-arguments`, `launcher-shellcheck`)
+#   - that the NixOS module wires the container correctly (`nixos-module`)
+#   - and the four that RUN the thing they test, because the small packages
+#     carry no game content: `merge-ini`, `render-config`, `workshop-install`,
+#     `workshop-errors`
 #
 # `nix build .#zomboid-image` in the image workflow is what proves the heavy
 # half works.
@@ -83,11 +89,10 @@
     in
     {
       checks = {
-        # The one check here that RUNS the thing it tests. `zomboid-merge-ini`
+        # One of the four checks that RUN what they test. `zomboid-merge-ini`
         # carries no game content, so it builds and executes on any platform —
-        # and the merge is the only real behaviour in this repository, the
-        # piece that decides whether a restart keeps or discards what the
-        # server wrote for itself.
+        # and the merge is what decides whether a restart keeps or discards
+        # what the server wrote for itself.
         merge-ini =
           let
             existing = pkgs.writeText "existing.ini" ''
@@ -646,7 +651,7 @@
                 --set PVP=false \
                 --set PauseEmpty=true \
                 --mod tsarslib --mod Brita_2 \
-                --workshop 2392709985 --workshop 2857548524 \
+                --set "WorkshopItems=2392709985;2857548524" \
                 --sandbox Zombies=3 \
                 --sandbox XpMultiplier=1.5 \
                 --sandbox ZombieLore.Speed=2 \
@@ -663,14 +668,21 @@
               # would cut the message in half.
               zomboid-render-config --out list \
                 --mod "tsarslib, Brita_2" \
-                --workshop "2392709985,2857548524" \
                 --set "ServerWelcomeMessage=Hello, and welcome"
               grep -qxF "Mods=tsarslib;Brita_2" list/fragment.ini \
                 || { cat list/fragment.ini >&2; fail "a comma-separated --mod must expand to the same list"; }
-              grep -qxF "WorkshopItems=2392709985;2857548524" list/fragment.ini \
-                || { cat list/fragment.ini >&2; fail "a comma-separated --workshop must expand to the same list"; }
               grep -qxF "ServerWelcomeMessage=Hello, and welcome" list/fragment.ini \
                 || { cat list/fragment.ini >&2; fail "a comma in a --set value must survive; only list options split"; }
+
+              # `--workshop` used to live here and meant the OPPOSITE of the
+              # launcher's flag of the same name: this one asked the server to
+              # download through Steam. One name for one mechanism, so it is
+              # gone — and gone with a message rather than as an unknown
+              # option, because the two spellings were easy to confuse.
+              zomboid-render-config --out gone --workshop 2392709985 2>err.txt \
+                && fail "--workshop must no longer be a render-config option"
+              grep -q 'zomboid-workshop' err.txt \
+                || { cat err.txt >&2; fail "the rejection has to name the tool that does download workshop items"; }
 
               # Neither file is written when nothing feeds it. The launcher
               # tests for their existence to decide whether to merge, so a
@@ -751,6 +763,8 @@
                   nameEnv = env.ZOMBOID_SERVER_NAME;
                   secretEnv = env.ZOMBOID_CONFIG_SECRET_FILE;
                   adminEnv = env.ZOMBOID_ADMIN_PASSWORD_FILE;
+                  workshopEnv = env.ZOMBOID_WORKSHOP_ITEMS or "";
+                  offlineEnv = env.ZOMBOID_WORKSHOP_OFFLINE or "";
                   privateNetwork = container.privateNetwork;
                   mounts = lib.mapAttrs (_: m: {
                     inherit (m) hostPath isReadOnly;
@@ -798,8 +812,15 @@
               # working.
               grep -qxF 'Mods=tsarslib;Brita_2' ${renderedIni} \
                 || { cat ${renderedIni} >&2; fail "the mod ids never reach the rendered config"; }
-              grep -qxF 'WorkshopItems=2392709985;2857548524' ${renderedIni} \
-                || { cat ${renderedIni} >&2; fail "the workshop ids never reach the rendered config"; }
+              # `workshopItems` reaches the LAUNCHER, which downloads them with
+              # DepotDownloader — it must not also become `WorkshopItems=`,
+              # which asks the server to fetch the same items through Steam.
+              # Both would run, and the server's copy wins.
+              eq "2392709985 2857548524" "$(get '.workshopEnv')" \
+                "workshopItems has to reach the launcher's downloader"
+              grep -q '^WorkshopItems=' ${renderedIni} \
+                && { cat ${renderedIni} >&2; fail "workshopItems must not also ask the server to download through Steam"; }
+              eq "" "$(get '.offlineEnv')" "workshopOffline is off unless asked for"
               grep -qxF 'MaxPlayers=16' ${renderedIni} \
                 || { cat ${renderedIni} >&2; fail "settings never reach the rendered config"; }
               grep -qF 'Zombies = 3' ${renderedSandbox} \

@@ -48,6 +48,13 @@
           # Nothing in the container builds a derivation, so Nix and its ~200M of
           # closure would be dead weight on top of an image that is already ~7G
           # of game content.
+          #
+          # What the image DOES carry, and did not before `--workshop`, is
+          # DepotDownloader and the .NET runtime it needs — ~128M. That is not
+          # dead weight: it is how a workshop mod reaches the container at all,
+          # now that the server's own Steam download path is no longer the
+          # mechanism. Dropping it would leave `ZOMBOID_WORKSHOP_ITEMS` as an
+          # option the Helm values can set and the image cannot honour.
           withNix = false;
 
           # The server reaches the Steam master server over TLS.
