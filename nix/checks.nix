@@ -372,6 +372,47 @@
               has 'zomboid-render-config' "the --set/--mod/--sandbox flags have to reach the renderer"
               has '--print-config' "rendering must be inspectable without starting a ~7G server"
 
+              # `--workshop` downloads. Without this the server would have to,
+              # and on macOS it cannot — so a Mac would write the mod list,
+              # fetch nothing, and start with the mods silently absent.
+              has 'zomboid-workshop' "--workshop has to download the item, not just record it"
+              has 'mods-dir' "a downloaded item has to be installed where the server scans"
+
+              # The ids come back out of the installer because `Mods=` takes
+              # the id= from mod.info, which is neither the workshop id nor
+              # necessarily the folder name. Dropping this makes --workshop
+              # install a mod and then not enable it.
+              for s in "$linuxPath" "$darwinPath"; do
+                grep -qF 'render+=(--mod "$m")' "$s" \
+                  || fail "an installed workshop mod has to reach Mods= on its own ($s)"
+              done
+
+              # A process substitution hides its exit status from `set -o
+              # errexit`. Reading the installer's output through one made a
+              # failed download start the server anyway, with the mods missing
+              # and nothing logged — and the world the server then generates
+              # has no trace of them.
+              for s in "$linuxPath" "$darwinPath"; do
+                grep -qF '< <(zomboid-workshop' "$s" \
+                  && fail "the installer's output must not be read through a process substitution — its failure would be silent ($s)"
+                grep -qF 'zomboid-workshop "''${args[@]}" > "$work/installed"' "$s" \
+                  || fail "the installer has to run as a plain command so a failed download aborts the start ($s)"
+              done
+
+              # `--workshop` must NOT also write WorkshopItems=: the server
+              # would download every item a second time through Steam, and
+              # modFoldersOrder puts its copy first, at whatever version Steam
+              # has. The first grep pins the arm's shape so the second one can
+              # actually fail if --workshop is put back into it.
+              for s in "$linuxPath" "$darwinPath"; do
+                grep -qF -- '--set | --mod | --sandbox)' "$s" \
+                  || fail "the renderer's option arm changed shape; the assertion below no longer means anything ($s)"
+                grep -qF -- '--workshop | --sandbox)' "$s" \
+                  && fail "--workshop must not reach the ini renderer ($s)"
+                grep -qF -- '--set | --mod | --workshop' "$s" \
+                  && fail "--workshop must not reach the ini renderer ($s)"
+              done
+
               # Without an admin password a FIRST start blocks on an
               # interactive prompt that nothing in a container answers.
               has 'ZOMBOID_ADMIN_PASSWORD_FILE' "a first start needs a non-interactive admin password"
@@ -416,6 +457,101 @@
 
               touch $out
             '';
+
+        # Installing a workshop item, with `--offline` so nothing reaches the
+        # network — the download half needs Steam and cannot run here.
+        #
+        # The layout under test is the one build 42 actually requires, read out
+        # of `ZomboidFileSystem.getAllModFoldersAux`:
+        #
+        #   if (!Files.exists(path.resolve("common", "mod.info"))
+        #    && !Files.exists(path.resolve(versionDirName, "mod.info"))) continue;
+        #
+        # A folder that does not match is SKIPPED, with no message. So a wrong
+        # install path does not fail here — it produces a server that starts
+        # and reports "required mod not found" for a mod that is on disk.
+        workshop-install =
+          let
+            # One item carrying two mods, which is how a published collection
+            # arrives. `id=` differs from the folder name in one of them,
+            # because that is the case reading the folder name gets wrong.
+            item = pkgs.runCommand "fake-workshop-item" { } ''
+              mkdir -p $out/2392709985/mods/FolderOne/common/media/lua/shared
+              cat > $out/2392709985/mods/FolderOne/common/mod.info <<'EOF'
+              name=One
+              id=modone
+              EOF
+
+              mkdir -p $out/2392709985/mods/FolderTwo/42/media/lua/shared
+              cat > $out/2392709985/mods/FolderTwo/42/mod.info <<'EOF'
+              name=Two
+              id=modtwo
+              EOF
+
+              # A build 41 mod: mod.info at the root and no version directory.
+              # `getAllModFoldersAux` skips this shape without a word.
+              mkdir -p $out/2392709985/mods/FolderOld/media
+              cat > $out/2392709985/mods/FolderOld/mod.info <<'EOF'
+              name=Old
+              id=modold
+              versionMin=41.73
+              EOF
+            '';
+          in
+          pkgs.runCommand "workshop-install" { nativeBuildInputs = [ pkgs.zomboid-workshop ]; } ''
+            fail() { echo "FAIL: $*" >&2; exit 1; }
+
+            cp -r ${item} cache
+            chmod -R u+w cache
+
+            zomboid-workshop --cache cache --mods-dir mods --offline --id 2392709985 > ids.txt
+
+            # stdout is the mod-id channel and nothing else. The launcher reads
+            # it line by line straight into `Mods=`, so one stray progress line
+            # becomes a mod the server cannot find.
+            grep -qxF "modone" ids.txt || { cat ids.txt >&2; fail "the id= from a common/ mod.info must be reported"; }
+            grep -qxF "modtwo" ids.txt || { cat ids.txt >&2; fail "the id= from a version-dir mod.info must be reported"; }
+
+            # The build 41 mod is installed but NOT enabled. Putting it in
+            # `Mods=` would name a mod the server skips, and the server then
+            # reports the id rather than the reason.
+            grep -qxF "modold" ids.txt \
+              && { cat ids.txt >&2; fail "a mod with mod.info at its root must not be enabled — this build ignores it"; }
+
+            [ "$(wc -l < ids.txt)" = 2 ] || { cat ids.txt >&2; fail "stdout must carry the ids and nothing else"; }
+
+            # Installed under the FOLDER name, which is what the server scans
+            # for — while `Mods=` gets the id. Conflating the two installs a
+            # mod the server then cannot resolve.
+            [ -e mods/FolderOne/common/mod.info ] || fail "a common/ mod must be installed under its folder name"
+            [ -e mods/FolderTwo/42/mod.info ] || fail "a version-dir mod must be installed under its folder name"
+            [ -e mods/FolderOne/common/media ] || fail "the mod's media must come with it"
+
+            # Every mod in the item, not just the first. A collection published
+            # as one item is normal.
+            [ "$(find mods -maxdepth 1 -mindepth 1 -type d | wc -l)" = 3 ] \
+              || fail "every mod in a workshop item has to be installed, including one this build cannot enable"
+
+            # Replaced, not merged. A file the author dropped between versions
+            # would otherwise survive, and a stale Lua file in a mod fails deep
+            # in world load rather than at install time.
+            touch mods/FolderOne/common/media/lua/shared/StaleFromLastVersion.lua
+            zomboid-workshop --cache cache --mods-dir mods --offline --id 2392709985 > /dev/null
+            [ -e mods/FolderOne/common/media/lua/shared/StaleFromLastVersion.lua ] \
+              && fail "a reinstall must not keep a file the new version dropped"
+
+            # --offline with nothing downloaded is an error, not a silent
+            # start with no mods.
+            zomboid-workshop --cache cache --mods-dir mods --offline --id 111 2>/dev/null \
+              && fail "--offline on an item that was never downloaded must fail"
+
+            # A workshop id is a number. Anything else would reach
+            # DepotDownloader as a -pubfile argument.
+            zomboid-workshop --cache cache --mods-dir mods --id "; rm -rf /" 2>/dev/null \
+              && fail "a non-numeric workshop id must be rejected"
+
+            touch $out
+          '';
 
         # The two renderers of one format, diffed.
         #

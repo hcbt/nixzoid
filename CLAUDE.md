@@ -14,6 +14,9 @@ Zomboid-shaped remainder.
   `StartServer.command` on macOS, none of which work from a read-only store.
   Also the whole runtime interface: every `ZOMBOID_*` variable and every flag
   is documented at the top of it.
+- `pkgs/zomboid-server/workshop.nix` — downloads a Workshop item with
+  DepotDownloader and installs it into the state dir. The server cannot do this
+  on macOS, and its `id=` output is what `--workshop` feeds into `Mods=`.
 - `pkgs/zomboid-server/render-config.nix` — the same two files as
   `config-format.nix`, rendered from FLAGS at runtime instead of from Nix at
   evaluation time. `nix run … -- --mod x` has no evaluation left when the flag
@@ -92,6 +95,20 @@ Zomboid-shaped remainder.
   `steamclient.dylib` to ship and `-Dzomboid.steam` defaults to 0 there. The
   server works and is reachable by direct connection, but never appears in the
   in-game browser.
+- **The server cannot download mods on macOS, so the launcher does it.**
+  `--workshop` runs DepotDownloader (`-app 108600 -pubfile <id>`, anonymous)
+  and installs into `$state/mods`. It must NOT also write `WorkshopItems=`:
+  with Steam on, the server would fetch each item again and
+  `modFoldersOrder = workshop,steam,mods` puts its copy first.
+- **Build 42 wants `mod.info` in `<mod>/common/` or `<mod>/42/`, never at the
+  mod root.** `getAllModFoldersAux` skips a non-matching folder with NO
+  message, which surfaces as `required mod "x" not found` for a mod that is on
+  disk. Never rewrite a published mod's layout to work around it.
+- **Never read a subcommand through `< <(cmd)` in the launcher.** A process
+  substitution's exit status is invisible to `set -o errexit`. Reading the
+  workshop installer that way made a failed download start the server with the
+  mods missing and nothing logged — and the world it then generated had no
+  trace of them. `checks.launcher-arguments` guards this.
 - **Do not patch a Mach-O, and do not let anything strip one.** Every binary in
   the macOS depot is signed — ad-hoc on the PZ natives, an Azul certificate
   with the hardened runtime on the JRE. `strip` invalidates the signature and

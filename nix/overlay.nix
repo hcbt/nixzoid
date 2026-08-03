@@ -55,6 +55,11 @@ final: prev: {
   # output against the Nix renderer in `config-format.nix`.
   zomboid-render-config = final.callPackage ../pkgs/zomboid-server/render-config.nix { };
 
+  # Also game-content-free, so `checks.workshop-install` runs it — the install
+  # and mod-id half, with `--offline`, against a synthetic workshop item. Only
+  # the download needs Steam, and nothing in `checks` may reach the network.
+  zomboid-workshop = final.callPackage ../pkgs/zomboid-server/workshop.nix { };
+
   zomboid-server-unwrapped = final.callPackage ../pkgs/zomboid-server { };
   zomboid-server = final.callPackage ../pkgs/zomboid-server/wrapper.nix { };
 }

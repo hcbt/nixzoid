@@ -29,17 +29,31 @@
 #   ZOMBOID_ADMIN_USERNAME       admin account name                   (admin)
 #   ZOMBOID_ADMIN_PASSWORD_FILE  without it, a FIRST boot prompts on stdin
 #   ZOMBOID_STEAMCLIENT_DIR      a directory holding steamclient.so/.dylib
+#   ZOMBOID_WORKSHOP_ITEMS       workshop ids to install, space separated
+#   ZOMBOID_WORKSHOP_OFFLINE     reuse what is downloaded, contact Steam for nothing
 #
 # Every one of them has a flag, and the flag wins. The flags exist for the
 # `nix run` case, where there is no deployment to set an environment:
 #
-#   nix run github:hcbt/nixzoid -- --name knox --mod tsarslib --set MaxPlayers=16
+#   nix run github:hcbt/nixzoid -- --name knox --workshop 2392709985 --set MaxPlayers=16
 #
-# `--set`, `--mod`, `--workshop` and `--sandbox` go to `zomboid-render-config`,
-# which writes the same two files the environment variables point at. So a flag
-# and a hand-written file reach the server by one path, and
+# `--set`, `--mod` and `--sandbox` go to `zomboid-render-config`, which writes
+# the same two files the environment variables point at. So a flag and a
+# hand-written file reach the server by one path, and
 # `nixzoid.lib.mkServerIni` renders that file identically —
 # `checks.render-config` diffs the two renderers to keep it that way.
+#
+# ## Mods
+#
+# `--workshop <id>` is the whole interface: it downloads the item, installs
+# every mod it carries into `$state/mods`, and enables them. Nothing else is
+# needed — not `--mod`, and not a Steam client. `zomboid-workshop` explains why
+# the server cannot do this itself and what shape build 42 wants the mods in.
+#
+# It deliberately does NOT write `WorkshopItems=`. That key is the server's own
+# Steam download path, and running both would fetch each item twice at
+# potentially different versions, with `modFoldersOrder` deciding which one
+# wins. `--set WorkshopItems=…` still reaches it for anyone who wants it.
 #
 # ## Steam, and why macOS defaults to off
 #
@@ -63,6 +77,7 @@
   steamworks-sdk-redist,
   zomboid-merge-ini,
   zomboid-render-config,
+  zomboid-workshop,
   coreutils,
 
   # The JVM heap, as a DEFAULT — `$ZOMBOID_HEAP` and `--heap` override it.
@@ -163,8 +178,13 @@ let
                                [ZOMBOID_STEAM]
 
       --set KEY=VALUE          one <name>.ini key, repeatable
-      --mod ID                 append to Mods, repeatable
-      --workshop ID            append to WorkshopItems, repeatable
+      --workshop ID            download a Steam Workshop item, install it, and
+                               enable every mod it carries. Repeatable
+                               [ZOMBOID_WORKSHOP_ITEMS, space separated]
+      --mod ID                 enable a mod that is already installed.
+                               Repeatable. Not needed alongside --workshop
+      --offline                reuse what --workshop already downloaded and
+                               contact Steam for nothing [ZOMBOID_WORKSHOP_OFFLINE]
       --sandbox KEY=VALUE      one SandboxVars key, repeatable.
                                A dotted KEY nests: ZombieLore.Speed=2
 
@@ -202,6 +222,10 @@ let
     adminFile="''${ZOMBOID_ADMIN_PASSWORD_FILE:-}"
     render=()
     printOnly=0
+    # Space separated in the environment, because a Kubernetes env var and a
+    # systemd Environment= line have no way to carry a list.
+    read -r -a workshop <<< "''${ZOMBOID_WORKSHOP_ITEMS:-}"
+    offline="''${ZOMBOID_WORKSHOP_OFFLINE:-0}"
 
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -210,8 +234,11 @@ let
         --heap) need "$1" "$#"; heap=$2; shift 2 ;;
         --steam) steam=1; shift ;;
         --no-steam) steam=0; shift ;;
-        --set | --mod | --workshop | --sandbox)
+        --set | --mod | --sandbox)
           need "$1" "$#"; render+=("$1" "$2"); shift 2 ;;
+        # NOT passed to the renderer. This one downloads.
+        --workshop) need "$1" "$#"; workshop+=("$2"); shift 2 ;;
+        --offline) offline=1; shift ;;
         --config) need "$1" "$#"; config=$2; shift 2 ;;
         --secret-config) need "$1" "$#"; secret=$2; shift 2 ;;
         --sandbox-file) need "$1" "$#"; sandboxFile=$2; shift 2 ;;
@@ -238,10 +265,59 @@ let
     # inside a ~7G image, so adding one mod would mean rebuilding and
     # re-pushing the whole thing. Same reasoning as the heap above.
 
+    # ---- workshop ------------------------------------------------------
+    #
+    # Downloaded HERE rather than by the server. The server fetches
+    # `WorkshopItems` through Steam, and macOS has no steamclient to fetch it
+    # with — so a Mac would write the mod list, download nothing, and start
+    # anyway with the mods silently absent.
+    #
+    # `--workshop` therefore does NOT write `WorkshopItems=`. If it did, a
+    # Linux server with Steam enabled would download the same item a second
+    # time into its own workshop directory, and `modFoldersOrder` is
+    # `workshop,steam,mods` — so the Steam copy would win and this one would be
+    # dead weight at a different version. One mechanism per flag:
+    # `--set WorkshopItems=…` still selects the server's own Steam path for
+    # anyone who wants it.
+    #
+    # The ids come back out because `Mods=` takes the `id=` from mod.info,
+    # which is not the workshop id and need not be the folder name either. That
+    # is what lets a workshop id alone be enough.
+    # Created before the workshop step, which writes its mod-id list here.
+    #
     # Rendered outside the state directory, not into it: these are inputs to
     # this start rather than state, and a stray fragment.ini beside the saves
     # reads like something the server wrote.
     work=$(mktemp -d)
+
+    if [ ''${#workshop[@]} -gt 0 ]; then
+      args=(--cache "$state/workshop" --mods-dir "$state/mods")
+      [ "$offline" = 1 ] && args+=(--offline)
+      for id in "''${workshop[@]}"; do args+=(--id "$id"); done
+
+      # Redirected to a FILE, never read through `< <(…)`. A process
+      # substitution's exit status is invisible to `set -o errexit`, so a
+      # failed download would be swallowed and the server would start with the
+      # mods missing and nothing said. The world it then generates has no trace
+      # of them, and adding a mod to an existing save is not always reversible.
+      zomboid-workshop "''${args[@]}" > "$work/installed"
+
+      installed=()
+      while IFS= read -r line; do
+        [ -n "$line" ] && installed+=("$line")
+      done < "$work/installed"
+
+      # Appended after any explicit --mod, so a hand-written load order still
+      # leads. A mod named twice is not appended twice: PZ loads `Mods=` in
+      # order and a duplicate shifts everything after it.
+      for m in ''${installed[@]+"''${installed[@]}"}; do
+        case " ''${render[*]} " in
+          *" $m "*) ;;
+          *) render+=(--mod "$m") ;;
+        esac
+      done
+    fi
+
     if [ ''${#render[@]} -gt 0 ]; then
       zomboid-render-config --out "$work" "''${render[@]}"
     fi
@@ -381,6 +457,7 @@ in
     coreutils
     zomboid-merge-ini
     zomboid-render-config
+    zomboid-workshop
   ];
   text = launcher;
 }).overrideAttrs
