@@ -7,8 +7,9 @@
 #     openFirewall = true;
 #     stateDir = "/srv/zomboid";
 #
+#     # Downloaded on start by the launcher, and enabled on their own. `mods`
+#     # is only needed for a hand-placed mod or to fix the load order.
 #     workshopItems = [ "2392709985" "2857548524" ];
-#     mods = [ "tsarslib" "Brita_2" ];
 #
 #     settings = {
 #       PublicName = "…";
@@ -181,18 +182,39 @@ in
         "2857548524"
       ];
       description = ''
-        Steam Workshop ids to DOWNLOAD, rendered into the config's
-        `WorkshopItems=`. The server fetches each one from Steam on start, into
-        the state directory — nothing is baked into the image, so adding a mod
-        costs a restart rather than a ~7G rebuild.
+        Steam Workshop ids to install. The LAUNCHER downloads each one on
+        start with DepotDownloader, anonymously, into the state directory —
+        nothing is baked into the image, so adding a mod costs a restart rather
+        than a ~7G rebuild.
 
-        This is only half of enabling a mod. `mods` is the other half, and a
-        Workshop id listed here without its mod id there downloads content the
-        server then never loads.
+        Enough on its own. Every mod an item carries is installed and enabled,
+        with the mod ids read out of each `mod.info`, so `mods` is only needed
+        for a mod placed under the state directory by hand or to fix the load
+        order.
 
-        The trade for not pinning them: a mod author's update lands on the next
-        restart, unannounced. Steam also has to be reachable from wherever the
-        server runs.
+        This does NOT set `WorkshopItems=`, which asks the server to download
+        through Steam instead. Running both would fetch each item twice, at
+        possibly different versions, and the server's own copy wins — its mod
+        folder order is `workshop,steam,mods`. Set it through `settings` if you
+        want that path.
+
+        The trade for not pinning: a mod author's update lands on the next
+        restart, unannounced. Steam has to be reachable from wherever the
+        server runs, unless `workshopOffline` is set.
+      '';
+    };
+
+    workshopOffline = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Reuse whatever `workshopItems` has already downloaded and contact Steam
+        for nothing. A restart then cannot pick up a mod update — which is the
+        point, when a world is mid-run and a mod changing underneath it is the
+        risk being avoided.
+
+        A first start with this set fails, rather than starting without the
+        mods.
       '';
     };
 
@@ -209,8 +231,11 @@ in
         single Workshop item often ships several, and they rarely match the
         title.
 
-        Load order is the order given: a mod that patches another has to come
-        after it.
+        Rarely needed alongside `workshopItems`, which enables what it
+        downloads on its own. What it is still for: a mod placed under
+        `''${stateDir}/mods` by hand, and load order — `Mods=` loads in the
+        order given, ids listed here come first, and a library has to load
+        before whatever needs it.
       '';
     };
 
@@ -354,13 +379,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # `mkDefault`, so the two convenience options are just a spelling of two
-    # ini keys and `settings.Mods` still wins if someone would rather write it
-    # out directly.
-    services.zomboid.settings = lib.mkMerge [
-      (lib.mkIf (cfg.mods != [ ]) { Mods = lib.mkDefault cfg.mods; })
-      (lib.mkIf (cfg.workshopItems != [ ]) { WorkshopItems = lib.mkDefault cfg.workshopItems; })
-    ];
+    # `mkDefault`, so `mods` is just a spelling of an ini key and
+    # `settings.Mods` still wins if someone would rather write it out directly.
+    #
+    # `workshopItems` is NOT here. It reaches the launcher through the
+    # environment instead, because the launcher downloads those items itself —
+    # rendering them into `WorkshopItems=` would hand the job back to the
+    # server's Steam path and run both.
+    services.zomboid.settings = lib.mkIf (cfg.mods != [ ]) { Mods = lib.mkDefault cfg.mods; };
 
     coldstart.containers.zomboid = {
       inherit (cfg) openFirewall privateNetwork;
@@ -385,6 +411,14 @@ in
         ZOMBOID_STATE_DIR = containerStateDir;
         ZOMBOID_SERVER_NAME = cfg.serverName;
         ZOMBOID_ADMIN_USERNAME = cfg.adminUsername;
+      }
+      // lib.optionalAttrs (cfg.workshopItems != [ ]) {
+        # Space separated: a systemd `Environment=` line carries one string,
+        # and `zomboid-workshop` splits on either separator.
+        ZOMBOID_WORKSHOP_ITEMS = lib.concatMapStringsSep " " toString cfg.workshopItems;
+      }
+      // lib.optionalAttrs cfg.workshopOffline {
+        ZOMBOID_WORKSHOP_OFFLINE = "1";
       }
       // lib.optionalAttrs (cfg.settings != { }) {
         ZOMBOID_CONFIG_FILE = toString configFile;
@@ -429,16 +463,25 @@ in
     };
 
     warnings =
-      lib.optional (cfg.workshopItems != [ ] && cfg.mods == [ ]) ''
-        services.zomboid.workshopItems is set but services.zomboid.mods is
-        empty. The server will download those Workshop items and then enable
-        none of them: WorkshopItems= says what to fetch, Mods= says what to
-        load, and both are required.
+      # `workshopItems` alone is now the CORRECT spelling — the launcher
+      # enables what it installs — so the pairing that used to be warned about
+      # is gone. What is left is the two ways to say the same thing at once.
+      lib.optional (cfg.workshopItems != [ ] && cfg.settings ? WorkshopItems) ''
+        services.zomboid.workshopItems and settings.WorkshopItems are both set.
+        Those are two different downloaders for one job: the launcher fetches
+        the first with DepotDownloader, and the server fetches the second
+        through Steam. Each item would be downloaded twice, at possibly
+        different versions, and the server's copy wins — its mod folder order
+        is workshop,steam,mods. Use one of them.
       ''
       ++ lib.optional (cfg.mods != [ ] && cfg.workshopItems == [ ]) ''
         services.zomboid.mods is set but services.zomboid.workshopItems is
         empty. The server will try to enable mods it never downloaded, unless
         every one of them is already present under ${cfg.stateDir}/mods.
+      ''
+      ++ lib.optional (cfg.workshopOffline && cfg.workshopItems == [ ]) ''
+        services.zomboid.workshopOffline is set but workshopItems is empty, so
+        it has nothing to act on.
       ''
       ++ lib.optional (cfg.adminPasswordFile == null) ''
         services.zomboid.adminPasswordFile is unset. On a first start — an empty

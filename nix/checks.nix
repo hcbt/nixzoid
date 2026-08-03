@@ -3,9 +3,15 @@
 # Deliberately NONE of these build the server. The two Steam depots are ~7G
 # unpacked, and a check that downloaded them would make `nix flake check` an
 # hour-long operation on every commit and every CI run. What is checked here is
-# everything that can go wrong WITHOUT the game content: that the derivations
-# instantiate, that the launcher's arguments are the ones upstream specifies,
-# and that the NixOS module wires the container correctly.
+# everything that can go wrong WITHOUT the game content:
+#
+#   - that the derivations instantiate, on both platforms (`packages-evaluate`)
+#   - that each launcher carries the arguments upstream specifies, on both
+#     platforms (`launcher-arguments`, `launcher-shellcheck`)
+#   - that the NixOS module wires the container correctly (`nixos-module`)
+#   - and the four that RUN the thing they test, because the small packages
+#     carry no game content: `merge-ini`, `render-config`, `workshop-install`,
+#     `workshop-errors`
 #
 # `nix build .#zomboid-image` in the image workflow is what proves the heavy
 # half works.
@@ -18,24 +24,31 @@
 
       format = import ../pkgs/zomboid-server/config-format.nix { inherit lib; };
 
-      # The server is x86_64-linux only, and these checks run wherever the
-      # developer is — so the package set under test is built explicitly rather
-      # than taken from `perSystem`. Nothing here is BUILT from it: every use
-      # below reads a `drvPath` or a `passthru` string.
-      linuxPkgs = import inputs.nixpkgs {
-        system = "x86_64-linux";
-        overlays = [
-          inputs.steam-fetcher.overlay
-          overlay
-        ];
-        config.allowUnfreePredicate =
-          pkg:
-          builtins.elem (lib.getName pkg) [
-            "zomboid-server"
-            "zomboid-server-unwrapped"
-            "steamworks-sdk-redist"
+      # The server exists on two systems and these checks run wherever the
+      # developer is — so each package set under test is built explicitly
+      # rather than taken from `perSystem`. Nothing here is BUILT from either:
+      # every use below reads a `drvPath` or a `passthru` string, which is what
+      # lets the macOS assertions run on a Linux CI runner and the Linux ones
+      # run on a laptop.
+      pkgsFor =
+        system:
+        import inputs.nixpkgs {
+          inherit system;
+          overlays = [
+            inputs.steam-fetcher.overlay
+            overlay
           ];
-      };
+          config.allowUnfreePredicate =
+            pkg:
+            builtins.elem (lib.getName pkg) [
+              "zomboid-server"
+              "zomboid-server-unwrapped"
+              "steamworks-sdk-redist"
+            ];
+        };
+
+      linuxPkgs = pkgsFor "x86_64-linux";
+      darwinPkgs = pkgsFor "aarch64-darwin";
 
       # `passthru`, not the built output: building would pull ~7G of Steam
       # depots into every `nix flake check`.
@@ -44,7 +57,9 @@
       # unwrapped server's store path, so handing the string to a derivation
       # makes that path an INPUT — and Nix then downloads both depots to build a
       # check that only ever reads text.
-      launcherScript = builtins.unsafeDiscardStringContext linuxPkgs.zomboid-server.launcher;
+      scriptOf = p: builtins.unsafeDiscardStringContext p.zomboid-server.launcher;
+      launcherScript = scriptOf linuxPkgs;
+      darwinLauncherScript = scriptOf darwinPkgs;
 
       # The module, built the same way `flake.nixosModules.default` builds it —
       # but from the files rather than from this flake's outputs, so evaluating
@@ -74,11 +89,10 @@
     in
     {
       checks = {
-        # The one check here that RUNS the thing it tests. `zomboid-merge-ini`
+        # One of the four checks that RUN what they test. `zomboid-merge-ini`
         # carries no game content, so it builds and executes on any platform —
-        # and the merge is the only real behaviour in this repository, the
-        # piece that decides whether a restart keeps or discards what the
-        # server wrote for itself.
+        # and the merge is what decides whether a restart keeps or discards
+        # what the server wrote for itself.
         merge-ini =
           let
             existing = pkgs.writeText "existing.ini" ''
@@ -199,23 +213,52 @@
         packages-evaluate =
           let
             drv = p: builtins.unsafeDiscardStringContext p.drvPath;
+            arg = lib.escapeShellArg;
           in
           pkgs.runCommand "packages-evaluate" { } ''
             fail() { echo "FAIL: $*" >&2; exit 1; }
             eq() { [ "$1" = "$2" ] || fail "$3 (expected '$1', got '$2')"; }
+            ne() { [ "$1" != "$2" ] || fail "$3"; }
 
-            echo ${lib.escapeShellArg (drv linuxPkgs.zomboid-server-unwrapped)}
-            echo ${lib.escapeShellArg (drv linuxPkgs.zomboid-server)}
+            echo ${arg (drv linuxPkgs.zomboid-server-unwrapped)}
+            echo ${arg (drv linuxPkgs.zomboid-server)}
+            echo ${arg (drv darwinPkgs.zomboid-server-unwrapped)}
+            echo ${arg (drv darwinPkgs.zomboid-server)}
 
-            # Both depots have to be inputs of the unwrapped derivation. If a
-            # refactor ever dropped one, the server would build and then fail
-            # at runtime with a missing jar or a missing native — the slowest
-            # possible way to find out.
-            eq 2 ${lib.escapeShellArg (toString (builtins.length linuxPkgs.zomboid-server-unwrapped.srcs))} \
-              "the unwrapped server merges both Steam depots"
+            # The shared depot plus the platform half. If a refactor ever
+            # dropped one, the server would build and then fail at runtime with
+            # a missing jar or a missing native — the slowest possible way to
+            # find out.
+            eq 2 ${arg (toString (builtins.length linuxPkgs.zomboid-server-unwrapped.srcs))} \
+              "the Linux server merges the common depot and its own"
+            eq 2 ${arg (toString (builtins.length darwinPkgs.zomboid-server-unwrapped.srcs))} \
+              "the macOS server merges the common depot and its own"
 
-            eq "zomboid-server" ${lib.escapeShellArg linuxPkgs.zomboid-server.meta.mainProgram} \
+            # Different halves, or one of the two platforms is silently
+            # building the other one's binaries.
+            ne ${arg (drv linuxPkgs.zomboid-server-unwrapped)} \
+               ${arg (drv darwinPkgs.zomboid-server-unwrapped)} \
+               "the two platforms must not resolve to one derivation"
+
+            eq "zomboid-server" ${arg linuxPkgs.zomboid-server.meta.mainProgram} \
               "the wrapper is the program consumers run"
+            eq "zomboid-server" ${arg darwinPkgs.zomboid-server.meta.mainProgram} \
+              "the wrapper is the program consumers run on macOS too"
+
+            # `nix run github:hcbt/nixzoid` resolves through mainProgram on the
+            # DEFAULT package, so both platforms have to declare themselves
+            # supported or the run has nothing to start.
+            for p in ${arg (lib.concatStringsSep " " linuxPkgs.zomboid-server.meta.platforms)}; do
+              echo "supported: $p"
+            done
+            case " ${lib.concatStringsSep " " linuxPkgs.zomboid-server.meta.platforms} " in
+              *" x86_64-linux "*) ;;
+              *) fail "x86_64-linux dropped out of meta.platforms" ;;
+            esac
+            case " ${lib.concatStringsSep " " darwinPkgs.zomboid-server.meta.platforms} " in
+              *" aarch64-darwin "*) ;;
+              *) fail "aarch64-darwin dropped out of meta.platforms" ;;
+            esac
 
             touch $out
           '';
@@ -233,44 +276,56 @@
         # as a build failure with the game already downloaded.
         #
         # This lints the same text the same way, in a second, from `passthru`.
+        # Both platforms. The two scripts differ in more than a variable name
+        # now — the argument parser is shared, but the Steam branch and the
+        # library-path export are not — so linting one of them proves nothing
+        # about the other.
         launcher-shellcheck =
           pkgs.runCommand "launcher-shellcheck"
             {
-              script = launcherScript;
-              passAsFile = [ "script" ];
+              linux = launcherScript;
+              darwin = darwinLauncherScript;
+              passAsFile = [
+                "linux"
+                "darwin"
+              ];
               nativeBuildInputs = [ pkgs.shellcheck ];
             }
             ''
-              # The preamble writeShellApplication prepends. Without it
-              # shellcheck lints a fragment with no shell dialect and no
-              # `set -u`, which is not what actually runs.
-              {
-                printf '#!/usr/bin/env bash\nset -o errexit\nset -o nounset\nset -o pipefail\n'
-                cat "$scriptPath"
-              } > launcher.sh
+              for script in "$linuxPath" "$darwinPath"; do
+                # The preamble writeShellApplication prepends. Without it
+                # shellcheck lints a fragment with no shell dialect and no
+                # `set -u`, which is not what actually runs.
+                {
+                  printf '#!/usr/bin/env bash\nset -o errexit\nset -o nounset\nset -o pipefail\n'
+                  cat "$script"
+                } > launcher.sh
 
-              shellcheck launcher.sh
+                shellcheck launcher.sh
+              done
 
               touch $out
             '';
 
         launcher-arguments =
-          let
-            script = launcherScript;
-          in
           pkgs.runCommand "launcher-arguments"
             {
-              inherit script;
-              passAsFile = [ "script" ];
+              linux = launcherScript;
+              darwin = darwinLauncherScript;
+              passAsFile = [
+                "linux"
+                "darwin"
+              ];
             }
             ''
               fail() { echo "FAIL: $*" >&2; exit 1; }
-              has() { grep -qF -- "$1" "$scriptPath" || fail "$2"; }
+              # Asserted against BOTH scripts unless a check says otherwise.
+              # Everything below this line that differs by platform is in the
+              # per-platform block at the end.
+              has() { for s in "$linuxPath" "$darwinPath"; do grep -qF -- "$1" "$s" || fail "$2 ($s)"; done; }
 
               has "-Djava.awt.headless=true" "a headless server must not try to open a display"
-              has "-Dzomboid.steam=1" "without the Steam flag the server never registers with the master server"
               has "-Djava.library.path=" "the JNI natives are found through java.library.path, or the server dies on first dlopen"
-              has "-XX:+UseZGC" "upstream selects ZGC; the default collector pauses a running world"
               # Retuning the heap must not require rebuilding a ~7G image.
               has 'ZOMBOID_HEAP:-' "the heap has to be overridable at runtime, with the built-in value as the default"
               has "zombie.network.GameServer" "the server main class"
@@ -281,7 +336,6 @@
               # Anywhere else and it starts, then dies deep in world load on a
               # missing animation asset or a null worldgen table, naming no file.
               has "cd /nix/store" "the working directory must be the install root, not the state dir"
-              has "LD_LIBRARY_PATH" "steamclient.so is resolved through LD_LIBRARY_PATH"
 
               # HOME and -cachedir= must agree. The server resolves some paths
               # from each, so setting only one scatters state across two
@@ -296,16 +350,73 @@
               has 'ZOMBOID_SANDBOX_FILE' "the sandbox settings have to be supplied at runtime"
               has 'ZOMBOID_SERVER_NAME' "the server name has to be supplied at runtime"
 
-              # The secret fragment is applied AFTER the declarative one, or a
-              # store-rendered empty Password= would overwrite the real one.
-              frag=$(grep -n 'ZOMBOID_CONFIG_FILE' "$scriptPath" | head -1 | cut -d: -f1)
-              secret=$(grep -n 'ZOMBOID_CONFIG_SECRET_FILE' "$scriptPath" | head -1 | cut -d: -f1)
-              [ "$secret" -gt "$frag" ] \
-                || fail "the secret config fragment must be merged after the declarative one, or it loses to it"
+              # The secret fragment is applied AFTER the declarative one and
+              # after the flags, or a store-rendered empty Password= would
+              # overwrite the real one. Ordering is checked on the MERGE calls,
+              # not on the first mention of each variable — the parser reads
+              # all of them at the top, in an order that means nothing.
+              for s in "$linuxPath" "$darwinPath"; do
+                frag=$(grep -n 'zomboid-merge-ini "\$config"' "$s" | head -1 | cut -d: -f1)
+                flags=$(grep -n 'zomboid-merge-ini "\$work/fragment.ini"' "$s" | head -1 | cut -d: -f1)
+                secret=$(grep -n 'zomboid-merge-ini "\$secret"' "$s" | head -1 | cut -d: -f1)
+                [ -n "$frag" ] && [ -n "$flags" ] && [ -n "$secret" ] \
+                  || fail "all three ini fragments must be merged, not just some of them ($s)"
+                [ "$flags" -gt "$frag" ] \
+                  || fail "a --set flag must be merged after the declared file, or the flag loses to it ($s)"
+                [ "$secret" -gt "$flags" ] \
+                  || fail "the secret config fragment must be merged last, or it loses to the others ($s)"
+              done
 
               # Merged, not copied. A copy would reset every option the server
               # maintains for itself on each restart.
               has 'zomboid-merge-ini' "the ini is merged into the server's own, not written over it"
+
+              # The flags exist for `nix run`, where there is no deployment to
+              # set an environment. A flag that never reaches the renderer is
+              # an option that parses and then does nothing.
+              has 'zomboid-render-config' "the --set/--mod/--sandbox flags have to reach the renderer"
+              has '--print-config' "rendering must be inspectable without starting a ~7G server"
+
+              # `--workshop` downloads. Without this the server would have to,
+              # and on macOS it cannot — so a Mac would write the mod list,
+              # fetch nothing, and start with the mods silently absent.
+              has 'zomboid-workshop' "--workshop has to download the item, not just record it"
+              has 'mods-dir' "a downloaded item has to be installed where the server scans"
+
+              # The ids come back out of the installer because `Mods=` takes
+              # the id= from mod.info, which is neither the workshop id nor
+              # necessarily the folder name. Dropping this makes --workshop
+              # install a mod and then not enable it.
+              for s in "$linuxPath" "$darwinPath"; do
+                grep -qF 'render+=(--mod "$m")' "$s" \
+                  || fail "an installed workshop mod has to reach Mods= on its own ($s)"
+              done
+
+              # A process substitution hides its exit status from `set -o
+              # errexit`. Reading the installer's output through one made a
+              # failed download start the server anyway, with the mods missing
+              # and nothing logged — and the world the server then generates
+              # has no trace of them.
+              for s in "$linuxPath" "$darwinPath"; do
+                grep -qF '< <(zomboid-workshop' "$s" \
+                  && fail "the installer's output must not be read through a process substitution — its failure would be silent ($s)"
+                grep -qF 'zomboid-workshop "''${args[@]}" > "$work/installed"' "$s" \
+                  || fail "the installer has to run as a plain command so a failed download aborts the start ($s)"
+              done
+
+              # `--workshop` must NOT also write WorkshopItems=: the server
+              # would download every item a second time through Steam, and
+              # modFoldersOrder puts its copy first, at whatever version Steam
+              # has. The first grep pins the arm's shape so the second one can
+              # actually fail if --workshop is put back into it.
+              for s in "$linuxPath" "$darwinPath"; do
+                grep -qF -- '--set | --mod | --sandbox)' "$s" \
+                  || fail "the renderer's option arm changed shape; the assertion below no longer means anything ($s)"
+                grep -qF -- '--workshop | --sandbox)' "$s" \
+                  && fail "--workshop must not reach the ini renderer ($s)"
+                grep -qF -- '--set | --mod | --workshop' "$s" \
+                  && fail "--workshop must not reach the ini renderer ($s)"
+              done
 
               # Without an admin password a FIRST start blocks on an
               # interactive prompt that nothing in a container answers.
@@ -316,6 +427,281 @@
               # called cannot drift from the name the server is told — the
               # image entrypoint passes no arguments at all.
               has '-servername' "the launcher supplies the server name itself"
+
+              # ---- per platform ------------------------------------------
+              #
+              # Every one of these is a path or a flag the OTHER platform does
+              # not have. Getting one wrong produces a server that starts and
+              # then dies on the first dlopen, or does not start at all with an
+              # error naming the JVM rather than the file.
+              only() { grep -qF -- "$2" "$1" || fail "$3 ($1)"; }
+              never() { grep -qF -- "$2" "$1" && fail "$3 ($1)"; true; }
+
+              only "$linuxPath" "jre64/bin/java" "the Linux depot puts the JVM in jre64/"
+              only "$linuxPath" "/linux64" "the Linux depot puts the JNI natives in linux64/"
+              only "$linuxPath" "LD_LIBRARY_PATH" "steamclient.so is resolved through LD_LIBRARY_PATH"
+              only "$linuxPath" "ZOMBOID_STEAM:-1" "Linux ships steamclient.so, so Steam networking defaults on"
+              only "$linuxPath" "-XX:+UseZGC" "upstream selects ZGC; the default collector pauses a running world"
+              never "$linuxPath" "-XstartOnFirstThread" "a macOS-only JVM flag would abort the JVM on Linux"
+
+              only "$darwinPath" "jre/Contents/Home/bin/java" "the macOS depot puts the JVM in jre/Contents/Home"
+              only "$darwinPath" "/natives" "the macOS depot puts the JNI natives in natives/"
+              only "$darwinPath" "DYLD_LIBRARY_PATH" "dyld does not read LD_LIBRARY_PATH"
+              only "$darwinPath" "-XstartOnFirstThread" "upstream's StartServer.command sets it"
+              # Depot 1005, the macOS Steamworks redist, is not available to an
+              # anonymous account — so there is no steamclient.dylib to ship
+              # and the server has to start on libZNetNoSteam.dylib instead.
+              only "$darwinPath" "ZOMBOID_STEAM:-0" "macOS has no shippable steamclient, so Steam networking defaults off"
+              only "$darwinPath" "ZOMBOID_STEAMCLIENT_DIR" "a Mac with its own Steam install must be able to turn Steam back on"
+              # `steamworks-sdk-redist` is a Linux-only package. Interpolating
+              # its path into the darwin script would make it a dependency of a
+              # macOS build, which then fails on a package that installs
+              # nothing there.
+              never "$darwinPath" "steamworks-sdk-redist" "the Linux-only Steamworks redist must not reach the macOS launcher"
+              never "$darwinPath" "-XX:+UseZGC" "StartServer.command selects no collector, so neither does this"
+
+              touch $out
+            '';
+
+        # Installing a workshop item, with `--offline` so nothing reaches the
+        # network — the download half needs Steam and cannot run here.
+        #
+        # The layout under test is the one build 42 actually requires, read out
+        # of `ZomboidFileSystem.getAllModFoldersAux`:
+        #
+        #   if (!Files.exists(path.resolve("common", "mod.info"))
+        #    && !Files.exists(path.resolve(versionDirName, "mod.info"))) continue;
+        #
+        # A folder that does not match is SKIPPED, with no message. So a wrong
+        # install path does not fail here — it produces a server that starts
+        # and reports "required mod not found" for a mod that is on disk.
+        workshop-install =
+          let
+            # One item carrying two mods, which is how a published collection
+            # arrives. `id=` differs from the folder name in one of them,
+            # because that is the case reading the folder name gets wrong.
+            item = pkgs.runCommand "fake-workshop-item" { } ''
+              mkdir -p $out/2392709985/mods/FolderOne/common/media/lua/shared
+              cat > $out/2392709985/mods/FolderOne/common/mod.info <<'EOF'
+              name=One
+              id=modone
+              EOF
+
+              mkdir -p $out/2392709985/mods/FolderTwo/42/media/lua/shared
+              cat > $out/2392709985/mods/FolderTwo/42/mod.info <<'EOF'
+              name=Two
+              id=modtwo
+              EOF
+
+              # A build 41 mod: mod.info at the root and no version directory.
+              # `getAllModFoldersAux` skips this shape without a word.
+              mkdir -p $out/2392709985/mods/FolderOld/media
+              cat > $out/2392709985/mods/FolderOld/mod.info <<'EOF'
+              name=Old
+              id=modold
+              versionMin=41.73
+              EOF
+
+              # A second item, so the list form below is tested with two
+              # distinct ids rather than one id repeated.
+              mkdir -p $out/2857548524/mods/FolderThree/common/media
+              cat > $out/2857548524/mods/FolderThree/common/mod.info <<'EOF'
+              name=Three
+              id=modthree
+              EOF
+            '';
+          in
+          pkgs.runCommand "workshop-install" { nativeBuildInputs = [ pkgs.zomboid-workshop ]; } ''
+            fail() { echo "FAIL: $*" >&2; exit 1; }
+
+            cp -r ${item} cache
+            chmod -R u+w cache
+
+            zomboid-workshop --cache cache --mods-dir mods --offline --id 2392709985 > ids.txt
+
+            # stdout is the mod-id channel and nothing else. The launcher reads
+            # it line by line straight into `Mods=`, so one stray progress line
+            # becomes a mod the server cannot find.
+            grep -qxF "modone" ids.txt || { cat ids.txt >&2; fail "the id= from a common/ mod.info must be reported"; }
+            grep -qxF "modtwo" ids.txt || { cat ids.txt >&2; fail "the id= from a version-dir mod.info must be reported"; }
+
+            # The build 41 mod is installed but NOT enabled. Putting it in
+            # `Mods=` would name a mod the server skips, and the server then
+            # reports the id rather than the reason.
+            grep -qxF "modold" ids.txt \
+              && { cat ids.txt >&2; fail "a mod with mod.info at its root must not be enabled — this build ignores it"; }
+
+            [ "$(wc -l < ids.txt)" = 2 ] || { cat ids.txt >&2; fail "stdout must carry the ids and nothing else"; }
+
+            # Installed under the FOLDER name, which is what the server scans
+            # for — while `Mods=` gets the id. Conflating the two installs a
+            # mod the server then cannot resolve.
+            [ -e mods/FolderOne/common/mod.info ] || fail "a common/ mod must be installed under its folder name"
+            [ -e mods/FolderTwo/42/mod.info ] || fail "a version-dir mod must be installed under its folder name"
+            [ -e mods/FolderOne/common/media ] || fail "the mod's media must come with it"
+
+            # Every mod in the item, not just the first. A collection published
+            # as one item is normal.
+            [ "$(find mods -maxdepth 1 -mindepth 1 -type d | wc -l)" = 3 ] \
+              || fail "every mod in a workshop item has to be installed, including one this build cannot enable"
+
+            # Replaced, not merged. A file the author dropped between versions
+            # would otherwise survive, and a stale Lua file in a mod fails deep
+            # in world load rather than at install time.
+            touch mods/FolderOne/common/media/lua/shared/StaleFromLastVersion.lua
+            zomboid-workshop --cache cache --mods-dir mods --offline --id 2392709985 > /dev/null
+            [ -e mods/FolderOne/common/media/lua/shared/StaleFromLastVersion.lua ] \
+              && fail "a reinstall must not keep a file the new version dropped"
+
+            # One flag, a list. `--id a,b` is what a person types, and
+            # `--id "a, b"` with a space after the comma is what they type when
+            # copying ids out of a browser. Both have to reach the same place a
+            # repeated flag does.
+            rm -rf mods
+            zomboid-workshop --cache cache --mods-dir mods --offline --id "2392709985, 2857548524" > listed.txt
+            grep -qxF "modone" listed.txt || fail "a comma-separated --id must install the first item"
+            grep -qxF "modthree" listed.txt || fail "a comma-separated --id must install the last item"
+
+            # And the repeated form still reaches the same place, so neither
+            # spelling is the odd one out.
+            rm -rf mods
+            zomboid-workshop --cache cache --mods-dir mods --offline --id 2392709985 --id 2857548524 > repeated.txt
+            diff listed.txt repeated.txt \
+              || fail "--id a,b and --id a --id b must do the same thing"
+
+            touch $out
+          '';
+
+        # Reached from the launcher only through `zomboid-workshop`, so the
+        # error paths below are what a user actually sees when a flag is wrong.
+        workshop-errors =
+          pkgs.runCommand "workshop-errors" { nativeBuildInputs = [ pkgs.zomboid-workshop ]; }
+            ''
+              fail() { echo "FAIL: $*" >&2; exit 1; }
+
+              # --offline with nothing downloaded is an error, not a silent
+              # start with no mods.
+              zomboid-workshop --cache cache --mods-dir mods --offline --id 111 2>/dev/null \
+                && fail "--offline on an item that was never downloaded must fail"
+
+              # A workshop id is a number. Anything else would reach
+              # DepotDownloader as a -pubfile argument.
+              zomboid-workshop --cache cache --mods-dir mods --id "; rm -rf /" 2>/dev/null \
+                && fail "a non-numeric workshop id must be rejected"
+
+              # Including inside a list, where a typo is likeliest — and where a
+              # skipped entry would otherwise look like a mod that just did not
+              # load.
+              zomboid-workshop --cache cache --mods-dir mods --id "2392709985,notanid" 2>/dev/null \
+                && fail "a bad id inside a list must be rejected too"
+
+              touch $out
+            '';
+
+        # The two renderers of one format, diffed.
+        #
+        # `config-format.nix` runs at EVALUATION time and serves the NixOS
+        # module and the Helm values. `zomboid-render-config` runs at RUNTIME
+        # and serves the flags, because `nix run … -- --mod tsarslib` has no
+        # evaluation left by the time the flag is read. Two renderers of one
+        # format drift, and the drift is invisible: both produce a file the
+        # server parses, and a setting spelled differently is read as a default
+        # rather than as an error.
+        #
+        # So they are diffed, byte for byte, on the values whose spellings are
+        # not obvious — a list, a boolean, a float, a nested group and a string
+        # holding the quote character the Lua needs escaped.
+        render-config =
+          let
+            settings = {
+              MaxPlayers = 16;
+              PVP = false;
+              PauseEmpty = true;
+              Mods = [
+                "tsarslib"
+                "Brita_2"
+              ];
+              WorkshopItems = [
+                "2392709985"
+                "2857548524"
+              ];
+            };
+            vars = {
+              Zombies = 3;
+              XpMultiplier = 1.5;
+              ZombieLore.Speed = 2;
+              Name = ''a "quoted" one'';
+            };
+          in
+          pkgs.runCommand "render-config"
+            {
+              nativeBuildInputs = [ pkgs.zomboid-render-config ];
+              nixIni = format.mkServerIni settings;
+              nixLua = format.mkSandboxVars vars;
+              passAsFile = [
+                "nixIni"
+                "nixLua"
+              ];
+            }
+            ''
+              fail() { echo "FAIL: $*" >&2; exit 1; }
+
+              zomboid-render-config --out cli \
+                --set MaxPlayers=16 \
+                --set PVP=false \
+                --set PauseEmpty=true \
+                --mod tsarslib --mod Brita_2 \
+                --set "WorkshopItems=2392709985;2857548524" \
+                --sandbox Zombies=3 \
+                --sandbox XpMultiplier=1.5 \
+                --sandbox ZombieLore.Speed=2 \
+                --sandbox 'Name=a "quoted" one'
+
+              diff -u "$nixIniPath" cli/fragment.ini \
+                || fail "the flag renderer and mkServerIni disagree"
+              diff -u "$nixLuaPath" cli/SandboxVars.lua \
+                || fail "the flag renderer and mkSandboxVars disagree"
+
+              # One flag, a list — and identical to the repeated form, so
+              # neither spelling is the odd one out. A `--set` value is NOT
+              # split: it is free text and a comma inside a server message
+              # would cut the message in half.
+              zomboid-render-config --out list \
+                --mod "tsarslib, Brita_2" \
+                --set "ServerWelcomeMessage=Hello, and welcome"
+              grep -qxF "Mods=tsarslib;Brita_2" list/fragment.ini \
+                || { cat list/fragment.ini >&2; fail "a comma-separated --mod must expand to the same list"; }
+              grep -qxF "ServerWelcomeMessage=Hello, and welcome" list/fragment.ini \
+                || { cat list/fragment.ini >&2; fail "a comma in a --set value must survive; only list options split"; }
+
+              # `--workshop` used to live here and meant the OPPOSITE of the
+              # launcher's flag of the same name: this one asked the server to
+              # download through Steam. One name for one mechanism, so it is
+              # gone — and gone with a message rather than as an unknown
+              # option, because the two spellings were easy to confuse.
+              zomboid-render-config --out gone --workshop 2392709985 2>err.txt \
+                && fail "--workshop must no longer be a render-config option"
+              grep -q 'zomboid-workshop' err.txt \
+                || { cat err.txt >&2; fail "the rejection has to name the tool that does download workshop items"; }
+
+              # Neither file is written when nothing feeds it. The launcher
+              # tests for their existence to decide whether to merge, so a
+              # renderer that always wrote them would merge an empty fragment
+              # over the server's own ini on every start.
+              zomboid-render-config --out empty
+              [ -e empty/fragment.ini ] && fail "an ini with no keys must not be written at all"
+              [ -e empty/SandboxVars.lua ] && fail "a sandbox with no keys must not be written at all"
+
+              # Two spellings of one key. Picking a winner silently is how half
+              # a mod list goes missing.
+              zomboid-render-config --out conflict --mod a --set Mods=b 2>/dev/null \
+                && fail "--mod and --set Mods= together must be an error"
+
+              # A key cannot be a value and a group at once. The Lua would
+              # parse either way, so the server would load it and take defaults
+              # for the whole group without saying so.
+              zomboid-render-config --out nested --sandbox A=1 --sandbox A.B=2 2>/dev/null \
+                && fail "a sandbox key used as both a value and a group must be an error"
 
               touch $out
             '';
@@ -377,6 +763,8 @@
                   nameEnv = env.ZOMBOID_SERVER_NAME;
                   secretEnv = env.ZOMBOID_CONFIG_SECRET_FILE;
                   adminEnv = env.ZOMBOID_ADMIN_PASSWORD_FILE;
+                  workshopEnv = env.ZOMBOID_WORKSHOP_ITEMS or "";
+                  offlineEnv = env.ZOMBOID_WORKSHOP_OFFLINE or "";
                   privateNetwork = container.privateNetwork;
                   mounts = lib.mapAttrs (_: m: {
                     inherit (m) hostPath isReadOnly;
@@ -424,8 +812,15 @@
               # working.
               grep -qxF 'Mods=tsarslib;Brita_2' ${renderedIni} \
                 || { cat ${renderedIni} >&2; fail "the mod ids never reach the rendered config"; }
-              grep -qxF 'WorkshopItems=2392709985;2857548524' ${renderedIni} \
-                || { cat ${renderedIni} >&2; fail "the workshop ids never reach the rendered config"; }
+              # `workshopItems` reaches the LAUNCHER, which downloads them with
+              # DepotDownloader — it must not also become `WorkshopItems=`,
+              # which asks the server to fetch the same items through Steam.
+              # Both would run, and the server's copy wins.
+              eq "2392709985 2857548524" "$(get '.workshopEnv')" \
+                "workshopItems has to reach the launcher's downloader"
+              grep -q '^WorkshopItems=' ${renderedIni} \
+                && { cat ${renderedIni} >&2; fail "workshopItems must not also ask the server to download through Steam"; }
+              eq "" "$(get '.offlineEnv')" "workshopOffline is off unless asked for"
               grep -qxF 'MaxPlayers=16' ${renderedIni} \
                 || { cat ${renderedIni} >&2; fail "settings never reach the rendered config"; }
               grep -qF 'Zombies = 3' ${renderedSandbox} \

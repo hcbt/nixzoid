@@ -1,28 +1,40 @@
 # The Project Zomboid dedicated server, assembled from its Steam depots.
 #
-# App 380870 splits the server across two depots, and BOTH are required:
+# App 380870 splits the server across a shared depot and one per platform, and
+# TWO of them are always required:
 #
 #   380871  platform-independent content — java/projectzomboid.jar, media/,
 #           the Lua stdlib. ~6.9G unpacked, which is essentially all of it.
 #   380873  the Linux half — the bundled Azul Zulu JRE, the JNI natives in
 #           linux64/, and the pzexe launcher.
+#   380872  the macOS half — an arm64 Azul Zulu JRE under jre/Contents/Home,
+#           and universal x86_64+arm64 JNI natives in natives/. 205M.
 #
-# Neither is useful alone: the jar is the server and the natives are what it
-# dlopen()s on startup.
+# Neither half is useful alone: the jar is the server and the natives are what
+# it dlopen()s on startup.
+#
+# ## Platforms
+#
+# `x86_64-linux` and `aarch64-darwin`. There is no `x86_64-darwin`: the macOS
+# depot's `jre/Contents/Home/bin/java` is a thin arm64 Mach-O, so an Intel Mac
+# has no JVM to run even though the natives themselves are universal.
 #
 # ## Updating to a new build
 #
 # `manifestId` pins an exact build, which is the only way a Steam fetch can be
-# a fixed-output derivation — "whatever is current" has no hash. Steam's own
-# metadata API lists them, no credentials needed:
+# a fixed-output derivation — "whatever is current" has no hash. All three move
+# together, because all three come out of one app build. Steam's own metadata
+# API lists them, no credentials needed:
 #
 #   curl -s https://api.steamcmd.net/v1/info/380870 \
-#     | jq '.data["380870"].depots | {"380871","380873"} | map_values(.manifests.public.gid)'
+#     | jq '.data["380870"].depots | {"380871","380872","380873"} | map_values(.manifests.public.gid)'
 #
-# Put the new gids below, set both hashes to
+# Put the new gids below, set the hashes to
 # `sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`, and build — Nix
-# reports the real hash. There is no way to compute it without downloading,
-# and DepotDownloader only runs on Linux, so this is a Linux-host operation.
+# reports the real hash. There is no way to compute it without downloading.
+# DepotDownloader runs on darwin as well as on Linux, but each host can only
+# fetch the depots it has a `fetchSteam` call for, so bumping all three needs
+# one build on each.
 {
   lib,
   stdenv,
@@ -47,12 +59,32 @@ let
     hash = "sha256-shjH/MO0oRBktDk75iQrn1Y8IEx8LofwBGTTZyz05WE=";
   };
 
-  linux = fetchSteam {
-    name = "zomboid-server-linux";
+  # The platform half, keyed by system. Kept as one table rather than one file
+  # per platform: the manifest ids are bumped together, and splitting them
+  # across files is how one of them gets left on the previous build.
+  platformDepots = {
+    x86_64-linux = {
+      depotId = "380873";
+      manifestId = "4894029153115054997";
+      hash = "sha256-hgQcKlG8vhOTX1k49MyiA9BQZ2ypPDe2ElJrd4XWNYk=";
+    };
+    aarch64-darwin = {
+      depotId = "380872";
+      manifestId = "918325764650181813";
+      hash = "sha256-wLkOE+q9p+LW+9BogqqFtRPvZhfqIqfxMMCDFRHUiCo=";
+    };
+  };
+
+  inherit (stdenv.hostPlatform) system;
+
+  spec =
+    platformDepots.${system}
+      or (throw "nixzoid: the Zomboid dedicated server has no Steam depot for ${system}");
+
+  platform = fetchSteam {
+    name = "zomboid-server-${system}";
     appId = "380870";
-    depotId = "380873";
-    manifestId = "4894029153115054997";
-    hash = "sha256-hgQcKlG8vhOTX1k49MyiA9BQZ2ypPDe2ElJrd4XWNYk=";
+    inherit (spec) depotId manifestId hash;
   };
 in
 stdenv.mkDerivation {
@@ -63,7 +95,7 @@ stdenv.mkDerivation {
   # `src` so neither is the "main" one and unpackPhase is skipped for both.
   srcs = [
     common
-    linux
+    platform
   ];
 
   # Prebuilt binaries: nothing to configure and nothing to build.
@@ -71,14 +103,27 @@ stdenv.mkDerivation {
   dontBuild = true;
   dontUnpack = true;
 
-  nativeBuildInputs = [ autoPatchelfHook ];
+  # Every Mach-O in the macOS depot carries a signature — ad-hoc on the PZ
+  # natives, an Azul certificate with the hardened runtime on the JRE. `strip`
+  # rewrites the load commands and invalidates it, and macOS then refuses to
+  # load the library with a SIGKILL that names no file. There is nothing to
+  # strip here in any case: these are vendor binaries, not a local build.
+  dontStrip = stdenv.hostPlatform.isDarwin;
+
+  nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [ autoPatchelfHook ];
 
   # What the JRE and the JNI natives resolve against once the interpreter is
   # rewritten. The Xorg entries look wrong for a headless server and are not:
   # the bundled JRE's libawt_xawt links them unconditionally, and an
   # unresolved NEEDED entry fails the patch phase whether or not anything ever
   # calls into it.
-  buildInputs = [
+  #
+  # Linux only, and not because darwin needs different libraries — it needs
+  # none. A Mach-O binary names its dependencies by absolute path or by
+  # @rpath, and everything the macOS depot links lives in /usr/lib, which is
+  # the dyld shared cache rather than a file. So nothing has to be rewritten,
+  # and nothing has to be supplied.
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
     stdenv.cc.cc.lib
     zlib
     alsa-lib
@@ -128,7 +173,8 @@ stdenv.mkDerivation {
 
   postFixup = ''
     root=$out/share/zomboid-server
-
+  ''
+  + lib.optionalString stdenv.hostPlatform.isLinux ''
     # Only where ELF actually lives. media/ is 6.9G of assets and scanning it
     # would dominate the build for no result.
     autoPatchelf -- "$root/linux64" "$root/jre64" "$root/ProjectZomboid64"
@@ -137,6 +183,13 @@ stdenv.mkDerivation {
     # binaries lose the bit through the copy above.
     chmod +x "$root/ProjectZomboid64" "$root/start-server.sh" || true
     chmod +x "$root"/jre64/bin/* || true
+  ''
+  + lib.optionalString stdenv.hostPlatform.isDarwin ''
+    # The same bit, in the paths the macOS depot uses. Nothing else happens
+    # here: patching a Mach-O would break the signature this build goes out
+    # of its way to preserve.
+    chmod +x "$root/StartServer.command" || true
+    chmod +x "$root"/jre/Contents/Home/bin/* || true
   '';
 
   meta = {
@@ -150,7 +203,7 @@ stdenv.mkDerivation {
     # Not redistributable. The image built from this must not be published to a
     # public registry — see the README.
     license = lib.licenses.unfree;
-    platforms = [ "x86_64-linux" ];
+    platforms = lib.attrNames platformDepots;
     mainProgram = "zomboid-server";
   };
 }
