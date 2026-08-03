@@ -50,8 +50,8 @@ writeShellApplication {
 
       --out DIR            where to write fragment.ini and SandboxVars.lua
       --set KEY=VALUE      one <name>.ini key, repeatable
-      --mod ID             append to Mods, repeatable
-      --workshop ID        append to WorkshopItems, repeatable
+      --mod ID[,ID...]     append to Mods. A list, and repeatable
+      --workshop ID[,ID...] append to WorkshopItems. A list, and repeatable
       --sandbox KEY=VALUE  one SandboxVars key, repeatable.
                            A dotted KEY nests: ZombieLore.Speed=2
     EOF
@@ -59,6 +59,13 @@ writeShellApplication {
     }
 
     die() { echo "zomboid-render-config: $*" >&2; exit 2; }
+
+    # `--mod a,b` and `--mod a --mod b` are the same thing, and so is
+    # `--mod "a, b"` with a space after the comma. Only the LIST options split:
+    # a `--set` or `--sandbox` value is free text and may hold a comma, and
+    # splitting one would cut a server message in half.
+    parts=()
+    split() { read -r -a parts <<< "''${1//,/ }"; }
 
     # `KEY=VALUE`, where KEY is non-empty and holds no `=`. A flag that is
     # merely a key with no `=` would otherwise render as a line the server
@@ -81,8 +88,18 @@ writeShellApplication {
       case "$1" in
         --out) [ "$#" -ge 2 ] || die "--out needs a directory"; out=$2; shift 2 ;;
         --set) [ "$#" -ge 2 ] || die "--set needs KEY=VALUE"; pair "$2" --set; ini+=("$2"); shift 2 ;;
-        --mod) [ "$#" -ge 2 ] || die "--mod needs an id"; mods+=("$2"); shift 2 ;;
-        --workshop) [ "$#" -ge 2 ] || die "--workshop needs an id"; workshop+=("$2"); shift 2 ;;
+        --mod)
+          [ "$#" -ge 2 ] || die "--mod needs an id"
+          split "$2"
+          mods+=(''${parts[@]+"''${parts[@]}"})
+          shift 2
+          ;;
+        --workshop)
+          [ "$#" -ge 2 ] || die "--workshop needs an id"
+          split "$2"
+          workshop+=(''${parts[@]+"''${parts[@]}"})
+          shift 2
+          ;;
         --sandbox) [ "$#" -ge 2 ] || die "--sandbox needs KEY=VALUE"; pair "$2" --sandbox; sandbox+=("$2"); shift 2 ;;
         -h|--help) usage ;;
         *) die "unknown option '$1'" ;;

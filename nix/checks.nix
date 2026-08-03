@@ -496,6 +496,14 @@
               id=modold
               versionMin=41.73
               EOF
+
+              # A second item, so the list form below is tested with two
+              # distinct ids rather than one id repeated.
+              mkdir -p $out/2857548524/mods/FolderThree/common/media
+              cat > $out/2857548524/mods/FolderThree/common/mod.info <<'EOF'
+              name=Three
+              id=modthree
+              EOF
             '';
           in
           pkgs.runCommand "workshop-install" { nativeBuildInputs = [ pkgs.zomboid-workshop ]; } ''
@@ -540,18 +548,50 @@
             [ -e mods/FolderOne/common/media/lua/shared/StaleFromLastVersion.lua ] \
               && fail "a reinstall must not keep a file the new version dropped"
 
-            # --offline with nothing downloaded is an error, not a silent
-            # start with no mods.
-            zomboid-workshop --cache cache --mods-dir mods --offline --id 111 2>/dev/null \
-              && fail "--offline on an item that was never downloaded must fail"
+            # One flag, a list. `--id a,b` is what a person types, and
+            # `--id "a, b"` with a space after the comma is what they type when
+            # copying ids out of a browser. Both have to reach the same place a
+            # repeated flag does.
+            rm -rf mods
+            zomboid-workshop --cache cache --mods-dir mods --offline --id "2392709985, 2857548524" > listed.txt
+            grep -qxF "modone" listed.txt || fail "a comma-separated --id must install the first item"
+            grep -qxF "modthree" listed.txt || fail "a comma-separated --id must install the last item"
 
-            # A workshop id is a number. Anything else would reach
-            # DepotDownloader as a -pubfile argument.
-            zomboid-workshop --cache cache --mods-dir mods --id "; rm -rf /" 2>/dev/null \
-              && fail "a non-numeric workshop id must be rejected"
+            # And the repeated form still reaches the same place, so neither
+            # spelling is the odd one out.
+            rm -rf mods
+            zomboid-workshop --cache cache --mods-dir mods --offline --id 2392709985 --id 2857548524 > repeated.txt
+            diff listed.txt repeated.txt \
+              || fail "--id a,b and --id a --id b must do the same thing"
 
             touch $out
           '';
+
+        # Reached from the launcher only through `zomboid-workshop`, so the
+        # error paths below are what a user actually sees when a flag is wrong.
+        workshop-errors =
+          pkgs.runCommand "workshop-errors" { nativeBuildInputs = [ pkgs.zomboid-workshop ]; }
+            ''
+              fail() { echo "FAIL: $*" >&2; exit 1; }
+
+              # --offline with nothing downloaded is an error, not a silent
+              # start with no mods.
+              zomboid-workshop --cache cache --mods-dir mods --offline --id 111 2>/dev/null \
+                && fail "--offline on an item that was never downloaded must fail"
+
+              # A workshop id is a number. Anything else would reach
+              # DepotDownloader as a -pubfile argument.
+              zomboid-workshop --cache cache --mods-dir mods --id "; rm -rf /" 2>/dev/null \
+                && fail "a non-numeric workshop id must be rejected"
+
+              # Including inside a list, where a typo is likeliest — and where a
+              # skipped entry would otherwise look like a mod that just did not
+              # load.
+              zomboid-workshop --cache cache --mods-dir mods --id "2392709985,notanid" 2>/dev/null \
+                && fail "a bad id inside a list must be rejected too"
+
+              touch $out
+            '';
 
         # The two renderers of one format, diffed.
         #
@@ -616,6 +656,21 @@
                 || fail "the flag renderer and mkServerIni disagree"
               diff -u "$nixLuaPath" cli/SandboxVars.lua \
                 || fail "the flag renderer and mkSandboxVars disagree"
+
+              # One flag, a list — and identical to the repeated form, so
+              # neither spelling is the odd one out. A `--set` value is NOT
+              # split: it is free text and a comma inside a server message
+              # would cut the message in half.
+              zomboid-render-config --out list \
+                --mod "tsarslib, Brita_2" \
+                --workshop "2392709985,2857548524" \
+                --set "ServerWelcomeMessage=Hello, and welcome"
+              grep -qxF "Mods=tsarslib;Brita_2" list/fragment.ini \
+                || { cat list/fragment.ini >&2; fail "a comma-separated --mod must expand to the same list"; }
+              grep -qxF "WorkshopItems=2392709985;2857548524" list/fragment.ini \
+                || { cat list/fragment.ini >&2; fail "a comma-separated --workshop must expand to the same list"; }
+              grep -qxF "ServerWelcomeMessage=Hello, and welcome" list/fragment.ini \
+                || { cat list/fragment.ini >&2; fail "a comma in a --set value must survive; only list options split"; }
 
               # Neither file is written when nothing feeds it. The launcher
               # tests for their existence to decide whether to merge, so a

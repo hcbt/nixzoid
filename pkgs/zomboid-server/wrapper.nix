@@ -29,7 +29,7 @@
 #   ZOMBOID_ADMIN_USERNAME       admin account name                   (admin)
 #   ZOMBOID_ADMIN_PASSWORD_FILE  without it, a FIRST boot prompts on stdin
 #   ZOMBOID_STEAMCLIENT_DIR      a directory holding steamclient.so/.dylib
-#   ZOMBOID_WORKSHOP_ITEMS       workshop ids to install, space separated
+#   ZOMBOID_WORKSHOP_ITEMS       workshop ids to install, comma or space separated
 #   ZOMBOID_WORKSHOP_OFFLINE     reuse what is downloaded, contact Steam for nothing
 #
 # Every one of them has a flag, and the flag wins. The flags exist for the
@@ -45,10 +45,11 @@
 #
 # ## Mods
 #
-# `--workshop <id>` is the whole interface: it downloads the item, installs
-# every mod it carries into `$state/mods`, and enables them. Nothing else is
-# needed — not `--mod`, and not a Steam client. `zomboid-workshop` explains why
-# the server cannot do this itself and what shape build 42 wants the mods in.
+# `--workshop <id>[,<id>...]` is the whole interface: it downloads the items,
+# installs every mod they carry into `$state/mods`, and enables them. Nothing
+# else is needed — not `--mod`, and not a Steam client. `zomboid-workshop`
+# explains why the server cannot do this itself, what shape build 42 wants the
+# mods in, and why the list splitting lives there rather than here.
 #
 # It deliberately does NOT write `WorkshopItems=`. That key is the server's own
 # Steam download path, and running both would fetch each item twice at
@@ -178,11 +179,11 @@ let
                                [ZOMBOID_STEAM]
 
       --set KEY=VALUE          one <name>.ini key, repeatable
-      --workshop ID            download a Steam Workshop item, install it, and
-                               enable every mod it carries. Repeatable
-                               [ZOMBOID_WORKSHOP_ITEMS, space separated]
-      --mod ID                 enable a mod that is already installed.
-                               Repeatable. Not needed alongside --workshop
+      --workshop ID[,ID...]    download Steam Workshop items, install them, and
+                               enable every mod they carry. A comma-separated
+                               list, and repeatable [ZOMBOID_WORKSHOP_ITEMS]
+      --mod ID[,ID...]         enable mods that are already installed. A list,
+                               and repeatable. Not needed alongside --workshop
       --offline                reuse what --workshop already downloaded and
                                contact Steam for nothing [ZOMBOID_WORKSHOP_OFFLINE]
       --sandbox KEY=VALUE      one SandboxVars key, repeatable.
@@ -222,9 +223,12 @@ let
     adminFile="''${ZOMBOID_ADMIN_PASSWORD_FILE:-}"
     render=()
     printOnly=0
-    # Space separated in the environment, because a Kubernetes env var and a
-    # systemd Environment= line have no way to carry a list.
-    read -r -a workshop <<< "''${ZOMBOID_WORKSHOP_ITEMS:-}"
+    # Passed through whole. `zomboid-workshop` splits on commas and spaces, so
+    # the environment carries a list the same way the flag does — and the
+    # splitting stays in a package a check can run, rather than in a launcher
+    # that cannot be built without ~7G of Steam depots.
+    workshop=()
+    [ -n "''${ZOMBOID_WORKSHOP_ITEMS:-}" ] && workshop+=("$ZOMBOID_WORKSHOP_ITEMS")
     offline="''${ZOMBOID_WORKSHOP_OFFLINE:-0}"
 
     while [ "$#" -gt 0 ]; do

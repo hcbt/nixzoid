@@ -95,6 +95,11 @@ Zomboid-shaped remainder.
   `steamclient.dylib` to ship and `-Dzomboid.steam` defaults to 0 there. The
   server works and is reachable by direct connection, but never appears in the
   in-game browser.
+- **List flags split on commas, and the splitting lives in the small
+  packages.** `--workshop a,b` and `--mod a,b` are handled by
+  `zomboid-workshop` and `zomboid-render-config`, not by the launcher — the
+  launcher cannot be built without ~7G of depots, so logic put there gets no
+  test. `--set` and `--sandbox` must never split: their values are free text.
 - **The server cannot download mods on macOS, so the launcher does it.**
   `--workshop` runs DepotDownloader (`-app 108600 -pubfile <id>`, anonymous)
   and installs into `$state/mods`. It must NOT also write `WorkshopItems=`:

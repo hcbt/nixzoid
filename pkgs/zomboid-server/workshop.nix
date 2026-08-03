@@ -1,6 +1,6 @@
 # Fetching Steam Workshop items, and installing them where the server looks.
 #
-#   zomboid-workshop --cache DIR --mods-dir DIR [--id ID]... [--offline]
+#   zomboid-workshop --cache DIR --mods-dir DIR [--id ID[,ID...]]... [--offline]
 #
 # Downloads each workshop item, installs the mods it carries into the mods
 # directory, and prints the mod ids it installed — one per line, on stdout, for
@@ -60,6 +60,16 @@ writeShellApplication {
     die() { echo "zomboid-workshop: $*" >&2; exit 2; }
     need() { [ "$2" -ge 2 ] || die "$1 needs a value"; }
 
+    # `--id 1,2` and `--id 1 --id 2` are the same thing, and so is `--id "1, 2"`
+    # with a space after the comma, which is what a person actually types. A
+    # workshop id is a decimal number and can hold neither separator, so
+    # splitting on both is unambiguous.
+    #
+    # Splitting HERE rather than in the launcher is what makes it testable: the
+    # launcher cannot be built without ~7G of Steam depots, and this can.
+    parts=()
+    split() { read -r -a parts <<< "''${1//,/ }"; }
+
     # The GAME, not the dedicated server. Workshop items are published against
     # 108600; 380870 has none and returns nothing.
     APPID=108600
@@ -73,7 +83,12 @@ writeShellApplication {
       case "$1" in
         --cache) need "$1" "$#"; cache=$2; shift 2 ;;
         --mods-dir) need "$1" "$#"; modsDir=$2; shift 2 ;;
-        --id) need "$1" "$#"; ids+=("$2"); shift 2 ;;
+        --id)
+          need "$1" "$#"
+          split "$2"
+          ids+=(''${parts[@]+"''${parts[@]}"})
+          shift 2
+          ;;
         # Reuse whatever is already downloaded and contact Steam for nothing.
         # A restart with no network, and a check with no network, both need it.
         --offline) offline=1; shift ;;

@@ -33,21 +33,21 @@ Everything the server needs can be given on the command line, which is what
 makes a one-off server a single command:
 
 ```bash
-nix run github:hcbt/nixzoid -- --name knox --workshop 3773911887 --set MaxPlayers=16 --sandbox Zombies=3
+nix run github:hcbt/nixzoid -- --name knox --workshop 3773911887,3774826484 --set MaxPlayers=16 --sandbox Zombies=3
 ```
 
-That downloads the Workshop item, installs it, enables it, and starts the
+That downloads both Workshop items, installs them, enables them, and starts the
 server. There is no second step and no Steam account involved.
 
-| Flag                          | What                                             |
-| ----------------------------- | ------------------------------------------------ |
-| `--name` `--state` `--heap`   | Server name, where saves live, JVM heap          |
-| `--set K=V`                   | One `<name>.ini` key, repeatable                 |
-| `--workshop ID`               | Download a Workshop item, install it, enable it  |
-| `--mod ID`                    | Enable an already-installed mod. Rarely needed   |
-| `--sandbox K=V`               | One `SandboxVars` key. A dotted key nests        |
-| `--config` / `--sandbox-file` | Whole files, for anything the flags do not cover |
-| `--print-config`              | Render the config, print it, and do not start    |
+| Flag                          | What                                               |
+| ----------------------------- | -------------------------------------------------- |
+| `--name` `--state` `--heap`   | Server name, where saves live, JVM heap            |
+| `--set K=V`                   | One `<name>.ini` key, repeatable                   |
+| `--workshop ID[,ID...]`       | Download Workshop items, install them, enable them |
+| `--mod ID[,ID...]`            | Enable already-installed mods. Rarely needed       |
+| `--sandbox K=V`               | One `SandboxVars` key. A dotted key nests          |
+| `--config` / `--sandbox-file` | Whole files, for anything the flags do not cover   |
+| `--print-config`              | Render the config, print it, and do not start      |
 
 Every flag has an environment variable as well, and `--help` names both. The
 flag wins. State defaults to `~/Zomboid` on macOS and `/data` on Linux.
@@ -186,7 +186,7 @@ deployment](#running-one-without-a-deployment). The flag wins.
 | `ZOMBOID_HEAP`                | JVM heap (`8g`)                                          |
 | `ZOMBOID_STEAM`               | `1` or `0`, the Steam networking stack                   |
 | `ZOMBOID_STEAMCLIENT_DIR`     | A directory holding `steamclient.so` / `.dylib`          |
-| `ZOMBOID_WORKSHOP_ITEMS`      | Workshop ids to install, space separated                 |
+| `ZOMBOID_WORKSHOP_ITEMS`      | Workshop ids to install, comma or space separated        |
 | `ZOMBOID_WORKSHOP_OFFLINE`    | Reuse what is downloaded, contact Steam for nothing      |
 | `ZOMBOID_SERVER_NAME`         | Names the config files, and `-servername` (`servertest`) |
 | `ZOMBOID_CONFIG_FILE`         | `<name>.ini` fragment, merged key by key                 |
@@ -218,12 +218,17 @@ There are two ways to get a mod onto the server, and they do not mix.
 #### `--workshop <id>` — the launcher downloads it
 
 ```bash
-nix run github:hcbt/nixzoid -- --workshop 3773911887 --workshop 3774826484
+nix run github:hcbt/nixzoid -- --workshop 3773911887,3774826484
 ```
 
 That is the whole thing. The launcher downloads each item, installs every mod it
 carries into `$state/mods`, reads the `id=` out of each `mod.info`, and puts
 those into `Mods=` for you. No `--mod`, no Steam, no account, no second step.
+
+The list takes commas or spaces, and the flag still repeats — `--workshop a,b`,
+`--workshop "a, b"` and `--workshop a --workshop b` are the same thing. `--mod`
+takes a list the same way. `--set` and `--sandbox` do **not** split: their values
+are free text, and a comma in a server message is a comma.
 
 It works because `depotdownloader -app 108600 -pubfile <id>` fetches a published
 workshop file **anonymously** — the same anonymous access `fetchSteam` already
