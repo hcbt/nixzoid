@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/hcbt/nixzoid/compare/v0.3.2...v0.4.0) (2026-08-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* `services.zomboid.workshopItems` no longer renders `WorkshopItems=`. It sets `ZOMBOID_WORKSHOP_ITEMS`, and the launcher downloads those items with DepotDownloader instead of the server fetching them through Steam — one downloader for one job, and the only one that works on macOS. It is also enough on its own now, so `mods` is only needed for a hand-placed mod or to fix load order. A host that relied on the Steam path can restore it with `settings.WorkshopItems`, and the module warns when both are set.
+
+### Added
+
+* run the server on macOS, and configure it from the command line ([#15](https://github.com/hcbt/nixzoid/issues/15)) ([e409470](https://github.com/hcbt/nixzoid/commit/e4094700be22814110b04d75ce8f2de34ac729c4))
+
 ## [0.3.2](https://github.com/hcbt/nixzoid/compare/v0.3.1...v0.3.2) (2026-08-01)
 
 
