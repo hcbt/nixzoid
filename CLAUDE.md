@@ -90,11 +90,18 @@ Zomboid-shaped remainder.
   flag. `nix/overlay.nix` patches it, darwin-only. The binary itself runs fine
   interactively, which makes this easy to misdiagnose: the failure is the
   sandbox's home directory, not the tool.
-- **macOS runs the server without Steam networking.** Depot 1005, the macOS
-  Steamworks redist, is not available to an anonymous account, so there is no
-  `steamclient.dylib` to ship and `-Dzomboid.steam` defaults to 0 there. The
-  server works and is reachable by direct connection, but never appears in the
-  in-game browser.
+- **macOS DEFAULTS to Steam networking off, and that is a default, not a
+  limit.** Depot 1005, the macOS Steamworks redist, is not available to an
+  anonymous account, so there is no `steamclient.dylib` to ship and
+  `-Dzomboid.steam` defaults to 0. With `ZOMBOID_STEAMCLIENT_DIR` pointed at a
+  local Steam install, `--steam` reaches `*** Steam is enabled`. A borrowed
+  dylib still cannot DOWNLOAD workshop items — that fails with
+  `Install library folder not found` and kills the server — but only when
+  `WorkshopItems=` is set, which `--workshop` never does.
+- **The only platform differences left in the launcher are two defaults.**
+  `--state` (`/data` vs `$HOME/Zomboid`) and `--steam` (1 vs 0). Every flag
+  parses and behaves identically otherwise; diff the two `passthru` launchers
+  with store paths normalised before claiming a third.
 - **List flags split on commas, and the splitting lives in the small
   packages.** `--workshop a,b` and `--mod a,b` are handled by
   `zomboid-workshop` and `zomboid-render-config`, not by the launcher — the

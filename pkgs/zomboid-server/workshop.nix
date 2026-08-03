@@ -10,13 +10,20 @@
 # ## Why the server cannot do this itself
 #
 # The server downloads `WorkshopItems` through Steam, and on macOS there is no
-# Steam: depot 1005, the macOS Steamworks redist, is not available to an
-# anonymous account, so there is no `steamclient.dylib` to ship. Pointing the
-# server at a local Steam install does not help either — it initialises, queries
-# the item, and then fails with `Install library folder not found` because a
-# borrowed `steamclient.dylib` has no Steam library to download into. It then
-# dies on a NullPointerException in `GameServerWorkshopItems.Install` rather
-# than starting without the mod.
+# Steam to download with: depot 1005, the macOS Steamworks redist, is not
+# available to an anonymous account, so there is no `steamclient.dylib` to ship.
+#
+# A local Steam install lends one, and that IS enough for Steam networking —
+# `--steam` with `ZOMBOID_STEAMCLIENT_DIR` reaches `*** Steam is enabled`. It is
+# not enough for downloading. A borrowed `steamclient.dylib` has no Steam
+# library directory to install into, so the query succeeds, the download fails
+# with `Install library folder not found`, and the server dies on a
+# NullPointerException in `GameServerWorkshopItems.Install` rather than starting
+# without the mod.
+#
+# That path is only reached when `WorkshopItems=` is set. This installer is why
+# `--workshop` never sets it, and therefore why `--steam` on macOS is usable at
+# all.
 #
 # DepotDownloader has no such problem. `-app 108600 -pubfile <id>` fetches a
 # published workshop file anonymously, needing no Steam client, no account and

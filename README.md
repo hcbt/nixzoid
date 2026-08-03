@@ -151,7 +151,7 @@ What differs by platform:
 `checks.launcher-arguments` asserts on all of it, for **both** scripts, because
 every one of those failures costs a full server start to discover.
 
-### macOS has no Steam networking
+### macOS defaults to Steam networking off
 
 The Steamworks redist has a macOS depot, `1005`, and Steam will not give it to
 an anonymous account:
@@ -166,9 +166,23 @@ it keeps saves, and mods load — but it does not register with the Steam master
 server, so it never appears in the in-game browser and players reach it by
 direct connection only.
 
-A Mac that has Steam installed already has the library. Point
-`ZOMBOID_STEAMCLIENT_DIR` at the directory holding it and pass `--steam`; no
-rebuild is involved.
+Off is a **default, not a limit**. A Mac with Steam installed already has the
+library, and pointing at it turns Steam networking on with no rebuild:
+
+```bash
+export ZOMBOID_STEAMCLIENT_DIR="$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS"
+nix run github:hcbt/nixzoid -- --steam --workshop 3773911887
+```
+
+The server then logs `SteamUtils initialised successfully` and `*** Steam is
+enabled`, and mods still load — `--workshop` downloads them itself either way.
+
+What a borrowed `steamclient.dylib` still cannot do is let the **server**
+download Workshop items. It has no Steam library directory to install into, so
+`GameServerWorkshopItems.Install` fails with `Install library folder not found`
+and takes the server down with a NullPointerException. That path is only
+reached when `WorkshopItems=` is set, which `--workshop` never does — so use
+`--workshop`, not `--set WorkshopItems=`, on macOS.
 
 ## Configuring it
 
