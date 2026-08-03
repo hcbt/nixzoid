@@ -48,7 +48,12 @@
   xorg,
 }:
 let
-  version = "42.19.0";
+  # The build the manifests below actually contain, not the one they were
+  # first labelled with. The server prints it at startup —
+  # `version=42.20.0 a2947723ca` — and that line is the only authority: a
+  # manifest id carries no version, so this string is maintained by hand and
+  # drifts silently when it is not.
+  version = "42.20.0";
 
   # Anonymous Steam access, so no credentials are involved anywhere here.
   common = fetchSteam {

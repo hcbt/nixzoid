@@ -279,7 +279,13 @@ let
 
     # Server/ is where both config files live, and the server does not create
     # it before trying to read them.
-    mkdir -p "$state" "$state/Server"
+    #
+    # mods/ is one of the three roots `getAllModFolders` scans, and the server
+    # registers a file watcher on it whether or not anything is installed
+    # there. Absent, that throws a NoSuchFileException with a twenty-line stack
+    # trace during startup — harmless, and indistinguishable at a glance from
+    # the failure of a mod that really did not load.
+    mkdir -p "$state" "$state/Server" "$state/mods"
 
     # ---- configuration -------------------------------------------------
     #
