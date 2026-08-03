@@ -337,6 +337,12 @@
               # missing animation asset or a null worldgen table, naming no file.
               has "cd /nix/store" "the working directory must be the install root, not the state dir"
 
+              # All three, before the server runs. It creates none of them, and
+              # a missing mods/ throws a NoSuchFileException with a twenty-line
+              # stack trace that reads like a mod failing to load.
+              has 'mkdir -p "$state" "$state/Server" "$state/mods"' \
+                "the state directory's three subdirectories have to exist before the server looks for them"
+
               # HOME and -cachedir= must agree. The server resolves some paths
               # from each, so setting only one scatters state across two
               # directories — one of them inside the store.
