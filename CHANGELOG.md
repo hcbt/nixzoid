@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/hcbt/nixzoid/compare/v0.4.0...v0.4.1) (2026-08-06)
+
+
+### Fixed
+
+* label the package with the build it actually contains, and create mods/ ([#17](https://github.com/hcbt/nixzoid/issues/17)) ([e5c6555](https://github.com/hcbt/nixzoid/commit/e5c655519bd293f82e424190ab57a0b1becb7ddd))
+* **steam:** follow the local steamclient, and say what non-Steam costs players ([#20](https://github.com/hcbt/nixzoid/issues/20)) ([2e1c698](https://github.com/hcbt/nixzoid/commit/2e1c69890ac1cb9e636e9b50d97db28a7b254403))
+
 ## [0.4.0](https://github.com/hcbt/nixzoid/compare/v0.3.2...v0.4.0) (2026-08-03)
 
 
