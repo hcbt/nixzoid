@@ -32,9 +32,26 @@
 # Put the new gids below, set the hashes to
 # `sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`, and build — Nix
 # reports the real hash. There is no way to compute it without downloading.
-# DepotDownloader runs on darwin as well as on Linux, but each host can only
-# fetch the depots it has a `fetchSteam` call for, so bumping all three needs
-# one build on each.
+# A depot fetch is content-addressed, so the COMMON depot's hash can be taken
+# on either host. Only the platform halves need their own.
+#
+# ## This is not optional maintenance
+#
+# Steam stops serving an old manifest to ANONYMOUS accounts once the app moves
+# on. The pin does not go stale quietly — it goes 401:
+#
+#   No manifest request code was returned for depot 380871 ...
+#   Suggestion: Try logging in with -username as old manifests may not be
+#   available for anonymous accounts.
+#   Encountered 401 for depot manifest 380871 5185212962431614537. Aborting.
+#
+# Nothing in `checks` can see this coming: the depots are never fetched there.
+# The image workflow is what finds it, and it finds it as a build that worked
+# last week and does not today, with no local change to explain it.
+#
+# The three ids also move INDEPENDENTLY. 380871 rotated on its own here while
+# both platform halves stayed put, and the version string moved with it —
+# 42.20.0 to 42.20.2 — because the jar lives in the shared depot.
 {
   lib,
   stdenv,
@@ -53,15 +70,15 @@ let
   # `version=42.20.0 a2947723ca` — and that line is the only authority: a
   # manifest id carries no version, so this string is maintained by hand and
   # drifts silently when it is not.
-  version = "42.20.0";
+  version = "42.20.2";
 
   # Anonymous Steam access, so no credentials are involved anywhere here.
   common = fetchSteam {
     name = "zomboid-server-common";
     appId = "380870";
     depotId = "380871";
-    manifestId = "5185212962431614537";
-    hash = "sha256-shjH/MO0oRBktDk75iQrn1Y8IEx8LofwBGTTZyz05WE=";
+    manifestId = "2587362105419356756";
+    hash = "sha256-pI7is306I6iHV/6ABuCGEI9EXtBuZYMOCaFLO4GSIew=";
   };
 
   # The platform half, keyed by system. Kept as one table rather than one file
