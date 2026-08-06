@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/hcbt/nixzoid/compare/v0.4.1...v0.4.2) (2026-08-06)
+
+
+### Fixed
+
+* bump the common depot to the manifest Steam still serves ([#22](https://github.com/hcbt/nixzoid/issues/22)) ([bfbe94d](https://github.com/hcbt/nixzoid/commit/bfbe94d92deeaddb0c3620be63b263e5cb62bf1e))
+
 ## [0.4.1](https://github.com/hcbt/nixzoid/compare/v0.4.0...v0.4.1) (2026-08-06)
 
 
