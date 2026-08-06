@@ -149,12 +149,32 @@ What differs by platform:
 | Library path | `LD_LIBRARY_PATH` | `DYLD_LIBRARY_PATH`          |
 | Collector    | `-XX:+UseZGC`     | whatever the JVM defaults to |
 | Extra flag   | —                 | `-XstartOnFirstThread`       |
-| Steam        | on                | off — see below              |
+| Steam        | on (redist)       | on if a local Steam is found |
 
 `checks.launcher-arguments` asserts on all of it, for **both** scripts, because
 every one of those failures costs a full server start to discover.
 
-### macOS defaults to Steam networking off
+### Steam mode decides how your players launch the game
+
+The two modes **do not interoperate**, and the game says so itself:
+
+```
+"Reminder: This Steam client can only connect to Steam servers."
+"Reminder: This non-Steam client can only connect to non-Steam servers."
+```
+
+So this is not a server-side preference. With Steam off, **every player** has to
+add `-nosteam` to their Project Zomboid launch options, or they cannot connect
+at all — not through the browser, and not by direct IP either.
+
+The launcher therefore says so on stderr at every start that runs without Steam:
+
+```
+zomboid-server: Steam networking is OFF. Players must start Project Zomboid
+with the -nosteam launch option, or they cannot connect.
+```
+
+### Where the steamclient comes from
 
 The Steamworks redist has a macOS depot, `1005`, and Steam will not give it to
 an anonymous account:
@@ -163,22 +183,25 @@ an anonymous account:
 Depot 1005 is not available from this account.
 ```
 
-So there is no `steamclient.dylib` to ship, and macOS defaults to
-`-Dzomboid.steam=0`. The server then runs on `libZNetNoSteam.dylib`: it works,
-it keeps saves, and mods load — but it does not register with the Steam master
-server, so it never appears in the in-game browser and players reach it by
-direct connection only.
+So there is no `steamclient.dylib` to **ship**. There is usually one to
+**find**: a Mac with Steam installed already has it, at the path upstream's own
+`StartServer.command` names. The launcher looks there and follows what it
+finds, so a Mac with Steam serves ordinary Steam clients with no flags and no
+rebuild:
 
-Off is a **default, not a limit**. A Mac with Steam installed already has the
-library, and pointing at it turns Steam networking on with no rebuild:
-
-```bash
-export ZOMBOID_STEAMCLIENT_DIR="$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS"
-nix run github:hcbt/nixzoid -- --steam --workshop 3773911887
+```
+LOG  : General > SteamUtils initialised successfully
+LOG  : Network > *** Steam is enabled
 ```
 
-The server then logs `SteamUtils initialised successfully` and `*** Steam is
-enabled`, and mods still load — `--workshop` downloads them itself either way.
+`ZOMBOID_STEAMCLIENT_DIR` overrides the search for a Steam install somewhere
+else. `--no-steam` forces the other mode, with the client cost above.
+
+Only a Mac with **no** Steam installed falls back to `-Dzomboid.steam=0`. The
+server then runs on `libZNetNoSteam.dylib`: it works, it keeps saves, mods
+load, and it is reachable by direct IP — from `-nosteam` clients only.
+
+Linux is always on. It ships the redist.
 
 What a borrowed `steamclient.dylib` still cannot do is let the **server**
 download Workshop items. It has no Steam library directory to install into, so

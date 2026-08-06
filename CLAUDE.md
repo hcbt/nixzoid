@@ -90,14 +90,27 @@ Zomboid-shaped remainder.
   flag. `nix/overlay.nix` patches it, darwin-only. The binary itself runs fine
   interactively, which makes this easy to misdiagnose: the failure is the
   sandbox's home directory, not the tool.
-- **macOS DEFAULTS to Steam networking off, and that is a default, not a
-  limit.** Depot 1005, the macOS Steamworks redist, is not available to an
-  anonymous account, so there is no `steamclient.dylib` to ship and
-  `-Dzomboid.steam` defaults to 0. With `ZOMBOID_STEAMCLIENT_DIR` pointed at a
-  local Steam install, `--steam` reaches `*** Steam is enabled`. A borrowed
-  dylib still cannot DOWNLOAD workshop items — that fails with
+- **The two Steam modes DO NOT INTEROPERATE, and the server's choice binds
+  every player.** The game's own strings, in
+  `media/lua/shared/Translate/EN/UI_EN.json`: "This Steam client can only
+  connect to Steam servers" / "This non-Steam client can only connect to
+  non-Steam servers". With Steam off, every client needs the `-nosteam` launch
+  option — direct IP does not get around it. Never describe non-Steam mode as
+  merely "not in the browser, direct connect only".
+- **macOS FINDS a steamclient rather than shipping one.** Depot 1005, the macOS
+  Steamworks redist, is not available to an anonymous account. A Mac with Steam
+  installed already has the library at the path upstream's
+  `StartServer.command` names, so the launcher tests for it and defaults Steam
+  ON when it is there. Only a Mac without Steam falls back to 0, and the
+  launcher prints the `-nosteam` instruction on stderr when it does.
+- **A borrowed dylib still cannot DOWNLOAD workshop items** — that fails with
   `Install library folder not found` and kills the server — but only when
   `WorkshopItems=` is set, which `--workshop` never does.
+- **The answer to a question about the GAME is usually in the depot.** The
+  client-connection rule sat in a shipped translation file for the whole of the
+  macOS work while it was repeatedly called "unverifiable without a second
+  machine". Grep `media/lua/` and `media/lua/shared/Translate/EN/` before
+  claiming something needs hardware to answer.
 - **The only platform differences left in the launcher are two defaults.**
   `--state` (`/data` vs `$HOME/Zomboid`) and `--steam` (1 vs 0). Every flag
   parses and behaves identically otherwise; diff the two `passthru` launchers

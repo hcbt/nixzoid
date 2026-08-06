@@ -446,7 +446,7 @@
               only "$linuxPath" "jre64/bin/java" "the Linux depot puts the JVM in jre64/"
               only "$linuxPath" "/linux64" "the Linux depot puts the JNI natives in linux64/"
               only "$linuxPath" "LD_LIBRARY_PATH" "steamclient.so is resolved through LD_LIBRARY_PATH"
-              only "$linuxPath" "ZOMBOID_STEAM:-1" "Linux ships steamclient.so, so Steam networking defaults on"
+              only "$linuxPath" "steam=1" "Linux ships steamclient.so, so Steam networking defaults on"
               only "$linuxPath" "-XX:+UseZGC" "upstream selects ZGC; the default collector pauses a running world"
               never "$linuxPath" "-XstartOnFirstThread" "a macOS-only JVM flag would abort the JVM on Linux"
 
@@ -457,8 +457,32 @@
               # Depot 1005, the macOS Steamworks redist, is not available to an
               # anonymous account — so there is no steamclient.dylib to ship
               # and the server has to start on libZNetNoSteam.dylib instead.
-              only "$darwinPath" "ZOMBOID_STEAM:-0" "macOS has no shippable steamclient, so Steam networking defaults off"
-              only "$darwinPath" "ZOMBOID_STEAMCLIENT_DIR" "a Mac with its own Steam install must be able to turn Steam back on"
+              # The two Steam modes cannot connect to each other — the game's
+              # own text is "This Steam client can only connect to Steam
+              # servers". So the server's mode dictates how every player has to
+              # launch the game, and macOS must not pick the constraining one
+              # while a local Steam install sits there unused.
+              only "$darwinPath" "Steam.AppBundle/Steam/Contents/MacOS" \
+                "macOS must look for the steamclient a local Steam install already has"
+              only "$darwinPath" "steamclient.dylib" \
+                "the search has to test for the library itself, not just the directory"
+              only "$darwinPath" "steam=0" "a Mac with no Steam install still has to fall back"
+              has "ZOMBOID_STEAMCLIENT_DIR" "an explicit steamclient directory must override the search"
+
+              # Silent is the failure mode that cost a real evening: the server
+              # logs "Steam is not enabled" and says nothing about the client.
+              #
+              # Asserted on the RUNTIME message, not on the string `-nosteam` —
+              # that also appears in the help text and in three comments, so a
+              # grep for it passes with the message deleted.
+              has 'zomboid-server: Steam networking is OFF' \
+                "a server starting without Steam has to say so at runtime, not only in --help"
+              for s in "$linuxPath" "$darwinPath"; do
+                grep -qF -- '-nosteam launch option' "$s" \
+                  || fail "the message has to name the launch option players need ($s)"
+                grep -qF -- '>&2' "$s" \
+                  || fail "the message has to reach stderr, beside the server's own log ($s)"
+              done
               # `steamworks-sdk-redist` is a Linux-only package. Interpolating
               # its path into the darwin script would make it a dependency of a
               # macOS build, which then fails on a package that installs

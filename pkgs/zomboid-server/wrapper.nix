@@ -64,12 +64,20 @@
 #
 #   Depot 1005 is not available from this account.
 #
-# So there is no `steamclient.dylib` to ship, and macOS defaults to
-# `-Dzomboid.steam=0`. The server then uses `libZNetNoSteam.dylib`, does not
-# register with the Steam master server, and is reachable by direct connection
-# only. `--steam` turns it back on for a host that has its own copy —
-# `ZOMBOID_STEAMCLIENT_DIR` pointed at a local Steam install is enough, and
-# needs no rebuild.
+# So there is no `steamclient.dylib` to SHIP. There is usually one to FIND: a
+# Mac with Steam installed already has it, at the path upstream's own
+# StartServer.command names. The launcher looks there and follows what it
+# finds, so a Mac with Steam serves ordinary Steam clients.
+#
+# Only a Mac without Steam falls back to `-Dzomboid.steam=0`, and that is not a
+# quiet fallback. The two modes DO NOT INTEROPERATE — the game's own text:
+#
+#   "Reminder: This Steam client can only connect to Steam servers."
+#   "Reminder: This non-Steam client can only connect to non-Steam servers."
+#
+# So the server's mode decides how every PLAYER has to launch the game. With
+# Steam off they each need the `-nosteam` launch option, and nothing tells them
+# that, which is why the launcher says it on stderr at every start.
 {
   lib,
   stdenv,
@@ -131,7 +139,10 @@ let
 
   # Whether the server registers with the Steam master server. See the header:
   # macOS has no anonymously fetchable steamclient, so it starts at 0.
-  steamDefault = if isDarwin then "0" else "1";
+  # Where a macOS host keeps the library the redist cannot supply. Upstream's
+  # own StartServer.command names this exact path, so it is the spec rather
+  # than a guess.
+  steamclientDir = "$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS";
 
   # Upstream's arguments, verbatim, except that the relative paths are absolute
   # and the heap is a parameter. Any divergence here is a runtime failure
@@ -177,7 +188,11 @@ let
                                [ZOMBOID_SERVER_NAME]
       --state DIR              saves, config and logs [ZOMBOID_STATE_DIR]
       --heap SIZE              JVM heap, for example 6g [ZOMBOID_HEAP]
-      --steam / --no-steam     register with the Steam master server
+      --steam / --no-steam     Steam networking. Defaults to on wherever a
+                               steamclient library is found, which on macOS
+                               means a local Steam install. With it OFF every
+                               player has to launch the game with -nosteam:
+                               the two modes cannot connect to each other
                                [ZOMBOID_STEAM]
 
       --set KEY=VALUE          one <name>.ini key, repeatable
@@ -220,7 +235,35 @@ let
     state="''${ZOMBOID_STATE_DIR:-${stateDir}}"
     name="''${ZOMBOID_SERVER_NAME:-${serverName}}"
     heap="''${ZOMBOID_HEAP:-${heapSize}}"
-    steam="''${ZOMBOID_STEAM:-${steamDefault}}"
+    # ---- Steam, and the client constraint it decides -------------------
+    #
+    # The two modes DO NOT INTEROPERATE, and the game says so itself:
+    #
+    #   "Reminder: This Steam client can only connect to Steam servers."
+    #   "Reminder: This non-Steam client can only connect to non-Steam servers."
+    #
+    # So this is not a server-side preference. It decides how every player has
+    # to launch the game, and defaulting it wrong costs each of them a
+    # `-nosteam` launch option they have to be told about out of band.
+    #
+    # Linux ships the Steamworks redist and is always on. macOS has no redist
+    # available to an anonymous account, so it LOOKS for the library a local
+    # Steam install already has and follows what it finds. A Mac with Steam
+    # therefore serves ordinary Steam clients, and only a Mac without one falls
+    # back to the mode that constrains its players.
+    steamclient="''${ZOMBOID_STEAMCLIENT_DIR:-}"
+    ${lib.optionalString isDarwin ''
+      if [ -z "$steamclient" ] && [ -e "${steamclientDir}/steamclient.dylib" ]; then
+        steamclient="${steamclientDir}"
+      fi
+    ''}
+    if [ -n "''${ZOMBOID_STEAM:-}" ]; then
+      steam="$ZOMBOID_STEAM"
+    elif [ -n "$steamclient" ]; then
+      steam=1
+    else
+      steam=${if isDarwin then "0" else "1"}
+    fi
     config="''${ZOMBOID_CONFIG_FILE:-}"
     secret="''${ZOMBOID_CONFIG_SECRET_FILE:-}"
     sandboxFile="''${ZOMBOID_SANDBOX_FILE:-}"
@@ -465,15 +508,23 @@ let
     # server, and never appears in the in-game browser, with nothing in the log
     # that names the missing library.
     #
-    # ZOMBOID_STEAMCLIENT_DIR is how a macOS host supplies its own: there is no
-    # redist to ship there, so `--steam` on a Mac needs a directory holding
-    # steamclient.dylib, usually inside a local Steam install.
+    # `$steamclient` is what the Steam block above resolved: whatever
+    # ZOMBOID_STEAMCLIENT_DIR named, or the local Steam install it found on
+    # macOS. Empty when there is none, and the `:+` then adds nothing.
     export ${libPathVar}="${root}/${nativesDir}:${root}${
       lib.optionalString (!isDarwin) ":${steamworks-sdk-redist}/lib"
-    }''${ZOMBOID_STEAMCLIENT_DIR:+:$ZOMBOID_STEAMCLIENT_DIR}''${${libPathVar}:+:''$${libPathVar}}"
+    }''${steamclient:+:$steamclient}''${${libPathVar}:+:''$${libPathVar}}"
 
     # steam_appid.txt needs no handling: the Steam API reads it from the working
     # directory, which is now the install root, and the depot ships it there.
+
+    # Said out loud, because it is otherwise invisible until a player fails to
+    # connect and neither side knows why. The server logs `Steam is enabled` or
+    # `Steam is not enabled` on its own, but neither line mentions what the
+    # CLIENT then has to do.
+    if [ "$steam" = 0 ]; then
+      echo "zomboid-server: Steam networking is OFF. Players must start Project Zomboid with the -nosteam launch option, or they cannot connect. A Steam client can only join a Steam server." >&2
+    fi
 
     exec ${root}/${javaBin} \
       "-Xmx$heap" \
