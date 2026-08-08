@@ -8,82 +8,70 @@
 # depot for the system. The IMAGE stays Linux-only: dockerTools cannot build a
 # Linux image from Darwin, and a package that evaluates everywhere but builds
 # in one place is worse than one that is honestly absent.
-{ inputs, ... }:
+#
+# `coldstart.lib.mkImage` is called directly rather than through
+# `coldstart.flakeModules.default`. The flake module only exists to turn an
+# option set into this same call, and this flake no longer runs flake-parts.
+{ inputs }:
 {
-  imports = [ inputs.coldstart.flakeModules.default ];
+  pkgs,
+  lib,
+  system,
+}:
+let
+  onLinux = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux;
 
-  # The platform guard is applied to each attribute's VALUE, never to the
-  # module's definition set. `perSystem = { pkgs, ... }: lib.optionalAttrs …`
-  # would make *which options exist* depend on `pkgs` — and `pkgs` is itself a
-  # module argument, so the module system cannot decide what is declared
-  # without already having it. That is an infinite recursion, and it reports
-  # itself as `_module.args` in lib/modules.nix with nothing pointing back
-  # here.
-  perSystem =
-    {
-      pkgs,
-      lib,
-      system,
-      ...
-    }:
-    let
-      onLinux = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux;
+  # `meta.platforms` of the unwrapped server is the depot table's key set, so
+  # this asks the package itself rather than repeating the list. Adding a depot
+  # in `default.nix` is then the only edit an extra platform needs.
+  onSupported = lib.optionalAttrs (lib.elem system pkgs.zomboid-server-unwrapped.meta.platforms);
+in
+onSupported {
+  inherit (pkgs) zomboid-server zomboid-server-unwrapped;
+  default = pkgs.zomboid-server;
+}
+// onLinux {
+  zomboid-image = inputs.coldstart.lib.mkImage {
+    inherit pkgs;
+    name = "zomboid";
+    packages = [ pkgs.zomboid-server ];
 
-      # `meta.platforms` of the unwrapped server is the depot table's key set,
-      # so this asks the package itself rather than repeating the list. Adding
-      # a depot in `default.nix` is then the only edit an extra platform needs.
-      onSupported = lib.optionalAttrs (lib.elem system pkgs.zomboid-server-unwrapped.meta.platforms);
-    in
-    {
-      packages = onSupported {
-        inherit (pkgs) zomboid-server zomboid-server-unwrapped;
-        default = pkgs.zomboid-server;
-      };
+    # Nothing in the container builds a derivation, so Nix and its ~200M of
+    # closure would be dead weight on top of an image that is already ~7G of
+    # game content.
+    #
+    # What the image DOES carry, and did not before `--workshop`, is
+    # DepotDownloader and the .NET runtime it needs — ~128M. That is not dead
+    # weight: it is how a workshop mod reaches the container at all, now that
+    # the server's own Steam download path is no longer the mechanism. Dropping
+    # it would leave `ZOMBOID_WORKSHOP_ITEMS` as an option the Helm values can
+    # set and the image cannot honour.
+    withNix = false;
 
-      coldstart.images = onLinux {
-        zomboid-image = {
-          name = "zomboid";
-          packages = [ pkgs.zomboid-server ];
+    # The server reaches the Steam master server over TLS.
+    withCacert = true;
 
-          # Nothing in the container builds a derivation, so Nix and its ~200M of
-          # closure would be dead weight on top of an image that is already ~7G
-          # of game content.
-          #
-          # What the image DOES carry, and did not before `--workshop`, is
-          # DepotDownloader and the .NET runtime it needs — ~128M. That is not
-          # dead weight: it is how a workshop mod reaches the container at all,
-          # now that the server's own Steam download path is no longer the
-          # mechanism. Dropping it would leave `ZOMBOID_WORKSHOP_ITEMS` as an
-          # option the Helm values can set and the image cannot honour.
-          withNix = false;
+    entrypoint = [ (lib.getExe pkgs.zomboid-server) ];
 
-          # The server reaches the Steam master server over TLS.
-          withCacert = true;
-
-          entrypoint = [ (lib.getExe pkgs.zomboid-server) ];
-
-          # Metadata only — the chart is what actually publishes them.
-          exposedPorts = {
-            "16261/udp" = { };
-            "16262/udp" = { };
-          };
-
-          user = {
-            name = "zomboid";
-            uid = 1000;
-            gid = 1000;
-            home = "/data";
-          };
-
-          # The wrapper defaults to /data, but the chart mounts the volume there
-          # and being explicit is what keeps the two from drifting apart.
-          env.ZOMBOID_STATE_DIR = "/data";
-
-          # Links the GHCR package to this repo, so a package pushed by CI
-          # inherits the repo's permissions instead of needing access granted by
-          # hand.
-          labels."org.opencontainers.image.source" = "https://github.com/hcbt/nixzoid";
-        };
-      };
+    # Metadata only — the chart is what actually publishes them.
+    exposedPorts = {
+      "16261/udp" = { };
+      "16262/udp" = { };
     };
+
+    user = {
+      name = "zomboid";
+      uid = 1000;
+      gid = 1000;
+      home = "/data";
+    };
+
+    # The wrapper defaults to /data, but the chart mounts the volume there and
+    # being explicit is what keeps the two from drifting apart.
+    env.ZOMBOID_STATE_DIR = "/data";
+
+    # Links the GHCR package to this repo, so a package pushed by CI inherits
+    # the repo's permissions instead of needing access granted by hand.
+    labels."org.opencontainers.image.source" = "https://github.com/hcbt/nixzoid";
+  };
 }

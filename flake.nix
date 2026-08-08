@@ -2,19 +2,33 @@
   description = "A Project Zomboid dedicated server, built with Nix and deployed as a container";
 
   inputs = {
-    # The shared scaffolding: treefmt, the git hooks, mkDevShell, the app
-    # helpers, and the generated GitHub-side files.
-    nivis.url = "github:hcbt/nivis/v0.8.2";
+    # Declared directly now that nivis is gone. nivis used to supply
+    # flake-parts, the dev shell, the hooks, the formatter and the generated
+    # GitHub files. devenv covers the shell and the hooks; the GitHub files are
+    # ordinary committed files again.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
-    # flake-parts builds `pkgs` from the CONSUMING flake's own nixpkgs input,
-    # so this cannot be dropped.
-    nixpkgs.follows = "nivis/nixpkgs";
+    # NOT `follows`-ed onto this flake's nixpkgs, deliberately. devenv is Rust,
+    # and the binaries on devenv.cachix.org are built against
+    # `cachix/devenv-nixpkgs/rolling`. Overriding its nixpkgs changes the
+    # derivation hash, every substituter misses, and devenv and its whole crate
+    # graph compile from source on each machine and each CI run.
+    #
+    # Nothing is lost by leaving it alone: `devenv.lib.mkShell` takes `pkgs`
+    # explicitly, so the shell's own tools still come from the package set
+    # below. Only devenv's implementation rides on its own pin.
+    devenv.url = "github:cachix/devenv";
+
+    # This one DOES follow. The hooks format this repository's files, so they
+    # must run the same nixpkgs the rest of it is built from.
+    git-hooks.url = "github:cachix/git-hooks.nix";
+    git-hooks.inputs.nixpkgs.follows = "nixpkgs";
 
     # The generic half: the OCI image builder, the Helm chart, and the
     # systemd-nspawn NixOS container. Everything here is the Zomboid-specific
     # remainder.
     coldstart = {
-      url = "github:hcbt/coldstart/v0.3.1";
+      url = "github:hcbt/coldstart";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -26,59 +40,89 @@
     };
   };
 
+  # devenv publishes its own builds, so the shell comes down prebuilt instead of
+  # being compiled on every machine and every CI run.
+  nixConfig = {
+    extra-substituters = "https://devenv.cachix.org";
+    extra-trusted-public-keys = "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=";
+  };
+
   outputs =
-    inputs@{ nivis, ... }:
-    nivis.inputs.flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = nivis.lib.defaultSystems;
-
-      imports = [
-        (nivis.flakeModules.default {
-          srcRoot = ./.;
-          repo = {
-            # Public repo, so GitHub-hosted runners are available and the Nix
-            # installer is needed.
-            runner = nivis.lib.repo.runners.githubHosted;
-            checks = true;
-            initialVersion = "0.1.0";
-            name = "nixzoid";
-            gitignoreExtra = ''
-              # devenv, if a shell ever uses it here
-              .devenv
-            '';
-            extraFiles = import ./nix/workflows.nix { };
-          };
-        })
-
-        ./nix/lib.nix # flake.overlays.default, nixosModules.default
-        ./nix/pkgs.nix # the `pkgs` this flake builds against
-        ./nix/packages.nix # the server, and the OCI image
-        ./nix/checks.nix
-        # The dev shell, inline rather than imported from nix/shells.nix:
-        # editor Nix integrations that read flake.nix textually cannot see a
-        # devShell defined in an imported module, even though the flake output
-        # is identical either way.
-        (
-          # `nix develop` / direnv. nivis' mkDevShell brings prek, the treefmt wrapper,
-          # the pinned shell utilities and the pre-commit devShell fragment.
-          { ... }:
-          {
-            perSystem =
-              { pkgs, mkDevShell, ... }:
-              {
-                devShells.default = mkDevShell {
-                  packages = [
-                    # For reading depot metadata off Steam's API when bumping the
-                    # manifest ids — see pkgs/zomboid-server/default.nix.
-                    pkgs.jq
-                    pkgs.kubernetes-helm
-                    pkgs.kubectl
-                    pkgs.yq-go
-                  ];
-                };
-              };
-          }
-        )
-        ./nix/format.nix
+    inputs@{
+      nixpkgs,
+      devenv,
+      ...
+    }:
+    let
+      # Only what something actually checks. Each entry needs a runner in
+      # .github/workflows/nix-check.yml, or it is a support claim nothing
+      # verifies.
+      systems = [
+        "x86_64-linux"
+        "aarch64-darwin"
       ];
+
+      forEachSystem = nixpkgs.lib.genAttrs systems;
+
+      # nixpkgs with the Steam overlay and the unfree predicate. Every output
+      # below goes through this rather than `legacyPackages`.
+      pkgsFor = import ./nix/pkgs.nix { inherit inputs; };
+    in
+    # The system-independent surface: the overlay, the NixOS module and the
+    # config renderers. devenv exposes none of these, which is why this flake
+    # stays.
+    import ./nix/lib.nix { inherit inputs; }
+    // {
+      packages = forEachSystem (
+        system:
+        import ./nix/packages.nix { inherit inputs; } {
+          inherit system;
+          pkgs = pkgsFor system;
+          inherit (nixpkgs) lib;
+        }
+      );
+
+      checks = forEachSystem (
+        system:
+        import ./nix/checks.nix { inherit inputs; } {
+          pkgs = pkgsFor system;
+          inherit (nixpkgs) lib;
+        }
+        // {
+          # The hooks, as a check. `devenv.lib.mkShell` installs them for a
+          # developer, but nothing in a devenv shell runs in CI — so without
+          # this, an unformatted file reaches master and nothing says so. This
+          # is what nivis' `checks.pre-commit` used to provide.
+          pre-commit = inputs.git-hooks.lib.${system}.run {
+            src = ./.;
+            package = (pkgsFor system).prek;
+            inherit ((import ./devenv.nix { pkgs = pkgsFor system; }).git-hooks) hooks excludes;
+          };
+        }
+      );
+
+      # `nix develop` / direnv. The shell itself is in devenv.nix so it can be
+      # diffed against the other repos' copies.
+      devShells = forEachSystem (system: {
+        default = devenv.lib.mkShell {
+          inherit inputs;
+
+          # devenv's OWN package set, not this flake's.
+          #
+          # `mkShell` builds `devenv-tasks` — a Rust program — out of whatever
+          # `pkgs` it is handed, and the binaries on devenv.cachix.org are
+          # built against `cachix/devenv-nixpkgs/rolling`. Pass this flake's
+          # nixpkgs-unstable instead and the derivation hash changes, every
+          # substituter misses, and devenv-tasks and prek compile from source
+          # on every machine and every CI run.
+          #
+          # Nothing needs the Zomboid overlay here. The shell holds helm,
+          # kubectl, jq and the everyday utilities, none of which the server or
+          # the image is built from — those still come from `pkgsFor`.
+          pkgs = import devenv.inputs.nixpkgs { inherit system; };
+
+          modules = [ ./devenv.nix ];
+        };
+      });
     };
 }
