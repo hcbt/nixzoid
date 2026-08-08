@@ -8,16 +8,21 @@
     # ordinary committed files again.
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
+    # NOT `follows`-ed onto this flake's nixpkgs, deliberately. devenv is Rust,
+    # and the binaries on devenv.cachix.org are built against
+    # `cachix/devenv-nixpkgs/rolling`. Overriding its nixpkgs changes the
+    # derivation hash, every substituter misses, and devenv and its whole crate
+    # graph compile from source on each machine and each CI run.
+    #
+    # Nothing is lost by leaving it alone: `devenv.lib.mkShell` takes `pkgs`
+    # explicitly, so the shell's own tools still come from the package set
+    # below. Only devenv's implementation rides on its own pin.
     devenv.url = "github:cachix/devenv";
-    devenv.inputs.nixpkgs.follows = "nixpkgs";
 
-    # `follows` both ways is load-bearing. The hooks must run the same nixpkgs
-    # the server is built from, and devenv must not pull a second git-hooks —
-    # two copies means two prek versions writing the same
-    # `.pre-commit-config.yaml`.
+    # This one DOES follow. The hooks format this repository's files, so they
+    # must run the same nixpkgs the rest of it is built from.
     git-hooks.url = "github:cachix/git-hooks.nix";
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
-    devenv.inputs.git-hooks.follows = "git-hooks";
 
     # The generic half: the OCI image builder, the Helm chart, and the
     # systemd-nspawn NixOS container. Everything here is the Zomboid-specific
@@ -98,17 +103,26 @@
 
       # `nix develop` / direnv. The shell itself is in devenv.nix so it can be
       # diffed against the other repos' copies.
-      devShells = forEachSystem (
-        system:
-        let
-          pkgs = pkgsFor system;
-        in
-        {
-          default = devenv.lib.mkShell {
-            inherit inputs pkgs;
-            modules = [ ./devenv.nix ];
-          };
-        }
-      );
+      devShells = forEachSystem (system: {
+        default = devenv.lib.mkShell {
+          inherit inputs;
+
+          # devenv's OWN package set, not this flake's.
+          #
+          # `mkShell` builds `devenv-tasks` — a Rust program — out of whatever
+          # `pkgs` it is handed, and the binaries on devenv.cachix.org are
+          # built against `cachix/devenv-nixpkgs/rolling`. Pass this flake's
+          # nixpkgs-unstable instead and the derivation hash changes, every
+          # substituter misses, and devenv-tasks and prek compile from source
+          # on every machine and every CI run.
+          #
+          # Nothing needs the Zomboid overlay here. The shell holds helm,
+          # kubectl, jq and the everyday utilities, none of which the server or
+          # the image is built from — those still come from `pkgsFor`.
+          pkgs = import devenv.inputs.nixpkgs { inherit system; };
+
+          modules = [ ./devenv.nix ];
+        };
+      });
     };
 }
