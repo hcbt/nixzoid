@@ -65,6 +65,8 @@
       forEachSystem = nixpkgs.lib.genAttrs systems;
 
       # devenv's own package set — what the shell is built from.
+      flakePkgsFor = forEachSystem pkgsFor;
+
       devenvPkgsFor = forEachSystem (system: import devenv.inputs.nixpkgs { inherit system; });
 
       # nixpkgs with the Steam overlay and the unfree predicate. Every output
@@ -108,7 +110,7 @@
                 # check itself stays on this flake's nixpkgs, because building
                 # it from devenv's realises a second uncached closure on the
                 # runner.
-                toolPkgs = devenvPkgsFor.${system};
+                toolPkgs = flakePkgsFor.${system};
               }).git-hooks
               )
               hooks
@@ -144,7 +146,7 @@
               # Same set as `pkgs` here. The split only matters in
               # `checks.pre-commit`, which builds from this flake's nixpkgs and
               # borrows only the tools.
-              toolPkgs = devenvPkgsFor.${system};
+              toolPkgs = flakePkgsFor.${system};
             })
           ];
         };
