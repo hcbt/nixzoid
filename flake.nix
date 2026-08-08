@@ -64,6 +64,9 @@
 
       forEachSystem = nixpkgs.lib.genAttrs systems;
 
+      # devenv's own package set — what the shell is built from.
+      devenvPkgsFor = forEachSystem (system: import devenv.inputs.nixpkgs { inherit system; });
+
       # nixpkgs with the Steam overlay and the unfree predicate. Every output
       # below goes through this rather than `legacyPackages`.
       pkgsFor = import ./nix/pkgs.nix { inherit inputs; };
@@ -96,7 +99,21 @@
           pre-commit = inputs.git-hooks.lib.${system}.run {
             src = ./.;
             package = (pkgsFor system).prek;
-            inherit ((import ./devenv.nix { pkgs = pkgsFor system; }).git-hooks) hooks excludes;
+            inherit
+              ((import ./devenv.nix {
+                pkgs = pkgsFor system;
+                # The hook TOOLS come from devenv's set, the same one the shell
+                # is built from, so `prek run --all-files` in the shell and this
+                # check cannot disagree about formatting. Only the tools — the
+                # check itself stays on this flake's nixpkgs, because building
+                # it from devenv's realises a second uncached closure on the
+                # runner.
+                toolPkgs = devenvPkgsFor.${system};
+              }).git-hooks
+              )
+              hooks
+              excludes
+              ;
           };
         }
       );
@@ -121,7 +138,15 @@
           # the image is built from — those still come from `pkgsFor`.
           pkgs = import devenv.inputs.nixpkgs { inherit system; };
 
-          modules = [ ./devenv.nix ];
+          modules = [
+            (import ./devenv.nix {
+              pkgs = devenvPkgsFor.${system};
+              # Same set as `pkgs` here. The split only matters in
+              # `checks.pre-commit`, which builds from this flake's nixpkgs and
+              # borrows only the tools.
+              toolPkgs = devenvPkgsFor.${system};
+            })
+          ];
         };
       });
     };

@@ -10,7 +10,14 @@
 # rather than replacing it, so any tool not named here falls through to a
 # Homebrew or /usr/bin copy without saying so. That is why the everyday
 # utilities are pinned alongside the repo-specific ones.
-{ pkgs, ... }:
+{
+  pkgs,
+  # The package set the HOOK TOOLS come from. flake.nix passes devenv's set,
+  # so the shell and `checks.pre-commit` run the same formatter binaries even
+  # though the check itself is built from this flake's nixpkgs.
+  toolPkgs ? pkgs,
+  ...
+}:
 {
   packages = [
     # Everyday utilities, so nothing resolves to a host binary.
@@ -40,7 +47,9 @@
   git-hooks.hooks = {
     # nixfmt is the RFC 166 formatter.
     nixfmt-rfc-style.enable = true;
+    nixfmt-rfc-style.package = toolPkgs.nixfmt;
     prettier.enable = true;
+    prettier.package = toolPkgs.prettier;
 
     # Correctness checks that are not formatting.
     check-merge-conflicts.enable = true;
