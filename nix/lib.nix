@@ -17,18 +17,16 @@
 # mounted. Same renderer either way, so the two deployments cannot drift into
 # different spellings of the same setting.
 #
-# System-independent, so `inputs.nixpkgs.lib` rather than a `perSystem` `pkgs` —
+# System-independent, so `inputs.nixpkgs.lib` rather than a per-system `pkgs` —
 # these are string functions, and nothing here builds.
-{ inputs, ... }:
+{ inputs }:
 {
-  flake = {
-    overlays.default = import ./overlay.nix;
+  overlays.default = import ./overlay.nix;
 
-    lib = import ../pkgs/zomboid-server/config-format.nix { inherit (inputs.nixpkgs) lib; };
+  lib = import ../pkgs/zomboid-server/config-format.nix { inherit (inputs.nixpkgs) lib; };
 
-    nixosModules.default = import ./nixos-module.nix {
-      inherit (inputs) steam-fetcher coldstart;
-      overlay = import ./overlay.nix;
-    };
+  nixosModules.default = import ./nixos-module.nix {
+    inherit (inputs) steam-fetcher coldstart;
+    overlay = import ./overlay.nix;
   };
 }

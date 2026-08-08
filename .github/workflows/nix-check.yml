@@ -2,21 +2,15 @@ name: Check
 
 on:
   pull_request:
-  # Only master. Pushing to a branch that has an open PR fires *both*
-  # this and the `pull_request` event on the same commit, and the
-  # concurrency group below cannot dedupe them: `github.ref` is
-  # `refs/heads/<branch>` for the push but `refs/pull/<n>/merge` for the
-  # PR, so they land in different groups and both survive — every job
-  # runs twice on the same commit.
+  # Only master. Pushing to a branch that has an open PR fires *both* this and
+  # the `pull_request` event on the same commit, and the concurrency group
+  # below cannot dedupe them: `github.ref` is `refs/heads/<branch>` for the
+  # push but `refs/pull/<n>/merge` for the PR, so they land in different groups
+  # and both survive — every job runs twice on the same commit.
   #
-  # It also produced a cancelled run on every release: release-please
-  # pushes its branch and immediately force-pushes it again, and with
-  # `"**"` the first push had already started a run for `cancel-in-progress`
-  # to kill.
-  #
-  # Nothing loses coverage: a branch with a PR is checked by
-  # `pull_request`, and master is checked on push. A branch with NO open
-  # PR gets no CI until one is opened — the deliberate trade.
+  # Nothing loses coverage: a branch with a PR is checked by `pull_request`,
+  # and master is checked on push. A branch with NO open PR gets no CI until
+  # one is opened — the deliberate trade.
   push:
     branches:
       - master
@@ -38,6 +32,26 @@ jobs:
 
       - uses: cachix/install-nix-action@v31
 
-      # Everything the flake declares, including the treefmt and hook
-      # checks and nivis' repo-files-current.
-      - run: nix flake check -L
+      # devenv publishes its own builds. Declared here as well as in
+      # `nixConfig`, because a workflow runner does not carry the
+      # trusted-settings file that accepts a flake's own `extra-substituters`.
+      - name: Trust the devenv cache
+        run: |
+          sudo tee -a /etc/nix/nix.conf > /dev/null <<'EOF'
+          extra-substituters = https://devenv.cachix.org
+          extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+          EOF
+
+      # `--no-pure-eval` is not optional: `devShells.default` is a devenv
+      # shell, devenv reads the working directory, and pure evaluation forbids
+      # that. Without the flag the check fails on evaluation, not on anything
+      # this repository got wrong.
+      #
+      # This covers the ten Zomboid checks and `pre-commit`, which is what runs
+      # the formatters now that treefmt is gone.
+      - run: nix flake check --no-pure-eval -L
+
+      # The dev shell is what every contributor gets. `nix flake check` only
+      # evaluates it, so a shell that evaluates and fails to build would reach
+      # master unnoticed.
+      - run: nix develop --no-pure-eval --command bash -c 'zomboid-depot-version --help >/dev/null 2>&1 || true; helm version --short'
